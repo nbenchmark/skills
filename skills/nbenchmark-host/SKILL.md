@@ -1,49 +1,47 @@
 ---
 name: nbenchmark-host
 nbenchmarkVersion: v0.1.0
-lastVerified: 2026-06-09
-description: Guide for using NBenchmark's Host mode for dedicated benchmark projects. Use when the user wants to set up a benchmark project with attribute-based discovery, CLI flags, dependency injection, or CI/CD regression detection with --threshold-pct.
+lastVerified: 2026-06-12
+description: NBenchmark Host mode for dedicated benchmark projects. Use when the user wants attribute-based benchmark discovery ([Benchmark], [BenchmarkArguments], lifecycle attributes, [IsolatedProcess]), a command-line interface (BenchmarkHost.Create(args)), constructor dependency injection for benchmark classes, or CI/CD regression gates. For one-off measurements and suites see the core nbenchmark skill; for output formats see nbenchmark-reporters.
 ---
 
 # NBenchmark Host Mode
 
-Host mode provides a dedicated benchmark runner using reflection-based discovery, attributes, and a built-in CLI. It is designed for standalone benchmark projects.
+`BenchmarkHost` is for **dedicated benchmark projects** — a separate console app that scans assemblies for `[Benchmark]`-decorated methods and exposes a full CLI, so you can filter and configure runs from the terminal without recompiling.
+
+Install: `dotnet add package NBenchmark` (+ `NBenchmark.Reporters.Console` for terminal output).
 
 ## When to use this skill
 
-User asks to:
+- Set up a dedicated benchmark console project
+- Discover benchmarks via `[Benchmark]` attributes
+- Parameterize benchmarks with `[BenchmarkArguments]`
+- Use setup/teardown lifecycle hooks
+- Isolate a benchmark in its own process (`[IsolatedProcess]`)
+- Drive runs from the command line
+- Inject dependencies into benchmark classes
+- Gate CI on performance regressions
 
-- Create a dedicated benchmark project
-- Use `[Benchmark]` and related attributes
-- Run benchmarks from the command line with `--filter`, `--list`, `--dry-run`
-- Add dependency injection to benchmarks
-- Set up CI/CD regression detection
-- Scan multiple assemblies for benchmarks
+## Minimal setup
 
-## Project Setup
-
-```xml
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
-  </PropertyGroup>
-  <ItemGroup>
-    <PackageReference Include="NBenchmark" Version="*" />
-    <!-- Optional: rich console output -->
-    <PackageReference Include="NBenchmark.Console" Version="*" />
-  </ItemGroup>
-</Project>
+```bash
+dotnet new console -n MyApp.Benchmarks
+cd MyApp.Benchmarks
+dotnet add package NBenchmark
+dotnet add package NBenchmark.Reporters.Console
+dotnet add reference ../MyApp/MyApp.csproj
 ```
 
-## Basic program.cs
-
 ```csharp
+// Program.cs
 using NBenchmark;
+using NBenchmark.Reporters.Console;
+using NBenchmark.Attributes;
 
 await BenchmarkHost.Create(args)
     .AddFromAssembly<StringBenchmarks>()
-    .WithReporter(new ConsoleReporter()) // Requires NBenchmark.Console
+    .WithReporter(new ConsoleReporter())
+    .WithProgress(new ConsoleBenchmarkProgress(200, 25))
     .RunAsync();
 
 public class StringBenchmarks
@@ -56,151 +54,150 @@ public class StringBenchmarks
 }
 ```
 
-## Attributes reference
+```bash
+dotnet run
+dotnet run -- --filter String*
+dotnet run -- --reporter markdown --output ./results
+```
 
-### [Benchmark]
+> Attributes live in the `NBenchmark.Attributes` namespace. The rich console types (`ConsoleReporter`, `ConsoleBenchmarkProgress`) live in `NBenchmark.Reporters.Console`.
+
+## Attributes
+
+All attributes are in `NBenchmark.Attributes`.
+
+### `[Benchmark]`
+
+Marks a **public instance** method (sync, `Task`, or `Task<T>`). Return a value to prevent dead-code elimination.
+
+| Property           | Type      | Default      | Description                               |
+| ------------------ | --------- | ------------ | ----------------------------------------- |
+| `Description`      | `string?` | `null`       | Optional label shown in output            |
+| `Baseline`         | `bool`    | `false`      | Marks the baseline for ratio/significance |
+| `Iterations`       | `int`     | `-1` (unset) | Per-method iteration override (0–100,000) |
+| `WarmupIterations` | `int`     | `-1` (unset) | Per-method warmup override (0–10,000)     |
+
+`Iterations`/`WarmupIterations` use `-1` as the "unset" sentinel (named attribute arguments can't be nullable value types). Set a value ≥ 0 to override the host options for that method only. Helpers `HasIterationsOverride` / `HasWarmupIterationsOverride` report whether an override is present.
 
 ```csharp
+[Benchmark(Baseline = true, Description = "current production")]
+public string CurrentImpl() => Production.DoWork();
+
+[Benchmark(Iterations = 1000, WarmupIterations = 100)]
+public string HotPath() => Candidate.DoWork();
+```
+
+### `[BenchmarkArguments(params object[])]`
+
+Runs the method once per argument set (`AllowMultiple = true`). The method must accept matching parameters. Each set becomes a separate entry named `MethodName(arg1, arg2, ...)`. Argument count/type mismatches are caught by analyzer NB0003.
+
+```csharp
+[BenchmarkArguments(10)]
+[BenchmarkArguments(1_000)]
+[BenchmarkArguments(100_000)]
 [Benchmark]
-[Benchmark(Baseline = true)]
-[Benchmark(Description = "My benchmark")]
-[Benchmark(Iterations = 500, WarmupIterations = 50)]
-[Benchmark(Baseline = true, Description = "current impl")]
+public void Sort(int n)
+{
+    var arr = Enumerable.Range(0, n).Reverse().ToArray();
+    Array.Sort(arr);
+}
 ```
-
-Properties: `Description` (string?), `Baseline` (bool), `Iterations` (int, sentinel -1 = unset), `WarmupIterations` (int, sentinel -1 = unset). Per-method `Iterations`/`WarmupIterations` override the suite-level options. Sentinel value `HasIterationsOverride` / `HasWarmupIterationsOverride` computed properties.
-
-### [BenchmarkArguments]
-
-```csharp
-[BenchmarkArguments("hello", 42)]
-[BenchmarkArguments("world", 99)]
-public string ConcatWith(string prefix, int count)
-    => string.Concat(Enumerable.Repeat(prefix, count));
-```
-
-Allows multiple per method; each set creates a separate benchmark entry. Arguments are converted via `Convert.ChangeType` with invariant culture. Nullable value types (e.g. `int?`) are unwrapped before conversion. Display name is auto-generated as `MethodName(arg1, arg2, ...)`.
 
 ### Lifecycle attributes
 
-| Attribute                      | When it runs                              | Count         |
-| ------------------------------ | ----------------------------------------- | ------------- |
-| `[BenchmarkSetup]`             | Once before any benchmark in the class    | 1             |
-| `[BenchmarkTeardown]`          | Once after all benchmarks in the class    | 1             |
-| `[BenchmarkIterationSetup]`    | Before each warmup and measured iteration | Per iteration |
-| `[BenchmarkIterationTeardown]` | After each warmup and measured iteration  | Per iteration |
+All must be **parameterless** methods. Duplicate lifecycle attributes in one class are an error (NB0007).
 
-Only one method per lifecycle attribute type is used per class (first found by reflection).
-
-## CLI flags reference
-
-| Flag                  | What it does                                                              |
-| --------------------- | ------------------------------------------------------------------------- |
-| `--filter <pattern>`  | Glob filter on `ClassName.BenchmarkName` (e.g. `String*`, `*.Contains*`)  |
-| `--iterations <n>`    | Override measured iterations (0 - 100,000)                                |
-| `--warmup <n>`        | Override warmup iterations (0 - 10,000)                                   |
-| `--reporter <type>`   | Set reporter: json, markdown, csv (or console with NBenchmark.Console)    |
-| `--output <dir>`      | Output directory for file-based reporters                                 |
-| `--confidence <0-1>`  | Confidence level for interval on the mean (e.g. 0.95, 0.99)               |
-| `--list`              | List discovered benchmarks without running                                |
-| `--dry-run`           | Run with 0 iterations; no measurement, no body invocation                 |
-| `--order <mode>`      | Run order: random (default) or declaration                                |
-| `--seed <n>`          | Seed for deterministic random ordering                                    |
-| `--threshold-pct <n>` | Fail with exit code 1 if any benchmark regresses >N% (median-based, n>=1) |
-| `--help, -h`          | Show help text                                                            |
-
-### CLI usage examples
-
-```bash
-# List benchmarks
-dotnet run -- --list
-
-# Filter to specific benchmarks
-dotnet run -- --filter String*
-
-# Validate discovery without running
-dotnet run -- --dry-run
-
-# Set iterations and confidence
-dotnet run -- --iterations 1000 --confidence 0.99
-
-# Output to files
-dotnet run -- --reporter markdown --reporter json --output ./results
-
-# Regression check: fail if any is >10% slower than baseline
-dotnet run -- --threshold-pct 10
-```
-
-### How CLI overrides work
-
-`--iterations`, `--warmup`, `--confidence` override the programmatic `WithOptions` values only for those specific fields. All other options keep their programmatic values. The override happens via `MergeCliOptions` in `BenchmarkHost.RunAsync`.
-
-## Assembly scanning
+| Attribute                      | Runs                                   | Measured? |
+| ------------------------------ | -------------------------------------- | --------- |
+| `[BenchmarkSetup]`             | Once before any benchmark in the class | No        |
+| `[BenchmarkTeardown]`          | Once after all benchmarks in the class | No        |
+| `[BenchmarkIterationSetup]`    | Before each iteration                  | No        |
+| `[BenchmarkIterationTeardown]` | After each iteration                   | No        |
 
 ```csharp
-// Single assembly
-await BenchmarkHost.Create(args)
-    .AddFromAssembly<StringBenchmarks>()
-    .RunAsync();
+public class DatabaseBenchmarks
+{
+    private DbConnection _conn = null!;
 
-// Multiple assemblies
+    [BenchmarkSetup] public void Open() => _conn = new DbConnection(cs);
+    [BenchmarkTeardown] public void Close() => _conn.Dispose();
+    [BenchmarkIterationSetup] public void Begin() => _conn.BeginTransaction();
+    [BenchmarkIterationTeardown] public void Rollback() => _conn.RollbackTransaction();
+
+    [Benchmark] public void RunQuery() => _conn.Execute("SELECT COUNT(*) FROM orders");
+}
+```
+
+### `[IsolatedProcess]`
+
+Runs a benchmark in a freshly spawned child process instead of in-process. Apply to a method, or to a class to isolate every benchmark it declares (`AttributeUsage = Method | Class`, `Inherited = true`).
+
+```csharp
+public class StartupBenchmarks
+{
+    [Benchmark]
+    [IsolatedProcess]
+    public int ColdPath() => RunColdSensitiveWork();
+}
+```
+
+Each isolated benchmark runs in a clean CLR, so it isn't influenced by JIT, GC, or thread-pool state warmed up by sibling benchmarks. The host re-runs the entry assembly for the child, executes only that one benchmark, and reads the result back through a temporary file (never stdout, so the child's console output can't corrupt the data). It uses internal `--nb-isolated-run` / `--nb-isolated-output` flags you never pass yourself. Isolation trades a process launch per benchmark for measurement cleanliness; use it only when a benchmark is sensitive to runtime warmup state. In-process and isolated benchmarks coexist in one suite and run separately.
+
+## Class requirements
+
+Classes are instantiated via `Activator.CreateInstance`, so they need a **public parameterless constructor** (NB0001 warns if missing). For constructor dependencies, use the DI companion package below.
+
+## Fluent host configuration
+
+`BenchmarkHost.Create(args)` returns a builder:
+
+| Method                                               | Purpose                                                                    |
+| ---------------------------------------------------- | -------------------------------------------------------------------------- |
+| `AddFromAssembly<T>()` / `AddFromAssembly(Assembly)` | Scan an assembly for `[Benchmark]` methods (call once per assembly)        |
+| `WithReporter(reporter)`                             | Add an `IReporter` (stackable)                                             |
+| `WithOptions(MeasurementOptions)`                    | Default measurement options (CLI flags override)                           |
+| `WithRunOrder(order)`                                | `RunOrder.Random` (default) or `RunOrder.Declaration`                      |
+| `WithDetail(detail)`                                 | `ReportDetail.Simple` (default) or `.Advanced`                             |
+| `WithProgress(progress)`                             | Live progress callback (`ConsoleBenchmarkProgress` in the console package) |
+| `WithInstanceFactory(factory)`                       | Custom factory for benchmark class instances (DI hook)                     |
+| `RunAsync()`                                         | Parse args, discover, run; returns `IReadOnlyList<BenchmarkResult>`        |
+
+```csharp
 await BenchmarkHost.Create(args)
     .AddFromAssembly<StringBenchmarks>()
     .AddFromAssembly<DatabaseBenchmarks>()
-    .AddFromAssembly(typeof(NetworkBenchmarks).Assembly)
-    .RunAsync();
-```
-
-Host scans all non-abstract types in registered assemblies for methods with `[Benchmark]`. Discovery uses instance methods only (public or non-public) - static methods are not supported and trigger analyzer NB0002.
-
-## Class requirements for host mode
-
-- Must have a public parameterless constructor (or use DI/`WithInstanceFactory`)
-- Cannot be abstract
-- Instance methods only (no static `[Benchmark]` methods)
-- `[Benchmark]` method parameters require `[BenchmarkArguments]`
-- `[BenchmarkArguments]` on parameterless methods raises an error
-- Parameterless methods without `[BenchmarkArguments]` are allowed
-
-## Fluent configuration
-
-```csharp
-await BenchmarkHost.Create(args)
-    .AddFromAssembly<MyBenchmarks>()
     .WithOptions(new MeasurementOptions
     {
         Iterations = 500,
         WarmupIterations = 50,
-        OutlierMode = OutlierMode.IqrFence,
+        MeasureAllocations = true,
+        ConfidenceLevel = 0.99,
     })
-    .WithRunOrder(RunOrder.Declaration)
+    .WithDetail(ReportDetail.Advanced)
     .WithReporter(new ConsoleReporter())
-    .WithReporter(new MarkdownReporter("results.md"))
-    .WithProgress(new ConsoleBenchmarkProgress(500, 50))
     .RunAsync();
 ```
 
-## Progress display
+Significance is configured through `WithOptions` (`EnableSignificance`, `SignificanceLevel`) or the `--alpha` CLI flag — there is no `WithSignificance` directly on the host. CLI flags always override `WithOptions` values.
 
-```csharp
-await BenchmarkHost.Create(args)
-    .AddFromAssembly<MyBenchmarks>()
-    .WithProgress(new ConsoleBenchmarkProgress(500, 25)) // 500 measured, 25 warmup
-    .RunAsync();
+## Command-line interface
+
+`BenchmarkHost.Create(args)` parses arguments automatically — no parsing library needed.
+
+```bash
+dotnet run -- --filter Sort* --iterations 1000 --reporter markdown --output ./results
+dotnet run -- --list        # discover without running
+dotnet run -- --dry-run     # wire up everything, never invoke the body
+dotnet run -- --detail advanced
 ```
 
-The `IBenchmarkProgress` interface has six callbacks:
+Frequently used flags: `--filter`, `--iterations`, `--warmup`, `--confidence`, `--alpha`, `--reporter`, `--output`, `--order`, `--seed`, `--detail`, `--list`, `--dry-run`, `--threshold-pct`, `--help`/`-h`.
 
-1. `OnSuiteStarting` - before any benchmark runs
-2. `OnWarmupStarting` - per-benchmark warmup start
-3. `OnWarmupCompleted` - per-benchmark warmup end
-4. `OnBenchmarkStarting` - per-benchmark measurement start
-5. `OnBenchmarkCompleted` - per-benchmark measurement end
-6. `OnSuiteCompleted` - after all benchmarks
+See [references/cli.md](references/cli.md) for every flag, exit codes, and CI examples.
 
-## Dependency Injection
+## Dependency injection
 
-Requires `NBenchmark.DependencyInjection` package.
+Add `NBenchmark.DependencyInjection` to give benchmark classes constructor dependencies. Any `IServiceProvider` works (Microsoft DI, Autofac, etc.).
 
 ```csharp
 using Microsoft.Extensions.DependencyInjection;
@@ -212,8 +209,7 @@ var services = new ServiceCollection()
     .BuildServiceProvider();
 
 await BenchmarkHost.Create(args)
-    .UseDependencyInjection<OrderBenchmarks>(services)
-    .WithReporter(new ConsoleReporter())
+    .UseDependencyInjection<OrderBenchmarks>(services)   // = AddFromAssembly<T>().WithServiceProvider(sp)
     .RunAsync();
 
 public sealed class OrderBenchmarks(IOrderRepository repository)
@@ -223,69 +219,34 @@ public sealed class OrderBenchmarks(IOrderRepository repository)
 }
 ```
 
-### Extension methods
+DI extension methods:
 
-| Method                                | Behaviour                                                                   |
-| ------------------------------------- | --------------------------------------------------------------------------- |
-| `UseDependencyInjection<T>(sp)`       | Scans assembly for T, resolves instances from `sp.GetRequiredService`       |
-| `UseScopedDependencyInjection<T>(sp)` | Same, but creates a scope per suite class and disposes it after teardown    |
-| `WithServiceProvider(sp)`             | Sets `WithInstanceFactory(sp.GetRequiredService)` without assembly scanning |
-| `WithScopedServiceProvider(sp)`       | Sets scoped instance factory without assembly scanning                      |
+| Method                                | Behaviour                                                                                       |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `WithServiceProvider(sp)`             | Resolve benchmark instances from `sp`                                                           |
+| `WithScopedServiceProvider(sp)`       | Create a DI scope for the run; disposed during post-suite cleanup (`DbContext`-style lifetimes) |
+| `UseDependencyInjection<T>(sp)`       | `AddFromAssembly<T>()` + `WithServiceProvider(sp)`                                              |
+| `UseScopedDependencyInjection<T>(sp)` | `AddFromAssembly<T>()` + `WithScopedServiceProvider(sp)`                                        |
 
-### Scoped lifetime example
+## CI/CD regression gate
 
-```csharp
-await BenchmarkHost.Create(args)
-    .UseScopedDependencyInjection<ScopedBenchmarks>(services)
-    .RunAsync();
-```
-
-Creates one scope per class, resolving all benchmark instances from that scope. The scope is disposed after teardown.
-
-### Custom instance factory (escape hatch)
-
-```csharp
-await BenchmarkHost.Create(args)
-    .AddFromAssembly<MyBenchmarks>()
-    .WithInstanceFactory(type =>
-    {
-        if (type == typeof(MyBenchmarks))
-            return new MyBenchmarks("custom-arg");
-        return Activator.CreateInstance(type)!;
-    })
-    .RunAsync();
-```
-
-## Return value
-
-```csharp
-IReadOnlyList<BenchmarkResult> results = await BenchmarkHost.Create(args)
-    .AddFromAssembly<MyBenchmarks>()
-    .RunAsync();
-
-// Check exit code for CI
-var hasRegression = Environment.ExitCode == 1;
-```
-
-## CI/CD Integration
-
-### Regression threshold
+`--threshold-pct <n>` exits with code **1** if any benchmark's median is more than `n`% slower than the baseline. Combine with a file reporter to keep the evidence (reporters still flush on a threshold failure).
 
 ```bash
-# Fail CI pipeline if any benchmark is >5% slower than baseline
-dotnet run -- --threshold-pct 5
+dotnet run -c Release -- --threshold-pct 10 --reporter json --output ./results
 ```
 
-Uses median-based comparison: `candidate.Median > baseline.Median * (1 + thresholdPct / 100)`. Sets `Environment.ExitCode = 1` on regression.
-
-### JSON output for pipeline consumption
-
-```bash
-dotnet run -- --reporter json --output ./benchmark-results
+```yaml
+# GitHub Actions
+- name: Run benchmarks
+  run: dotnet run -c Release --project benchmarks -- --threshold-pct 10 --reporter markdown --output ./bench
 ```
 
-### Markdown for PR comments
+For richer assertions (allocation budgets, P95 limits, baseline files) inside your existing test suite, see the `nbenchmark-integration` skill.
 
-```bash
-dotnet run -- --reporter markdown --output ./benchmark-results
-```
+## Related skills
+
+- **nbenchmark** — Quick and Suite modes, `MeasurementOptions`, `BenchmarkResult`
+- **nbenchmark-reporters** — reporter pipeline, detail levels, custom reporters
+- **nbenchmark-integration** — performance thresholds as xUnit/NUnit/MSTest tests
+- **nbenchmark-troubleshooting** — analyzer diagnostics, wrong results, tuning

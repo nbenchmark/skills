@@ -7,9 +7,10 @@ AI agent skills for [NBenchmark](https://github.com/nbenchmark/nbenchmark), a li
 | Skill | Description |
 |---|---|
 | **nbenchmark** | Core benchmarking with Quick mode (`Benchmark.Run` / `RunAsync`) and Suite mode (`BenchmarkSuite` fluent builder) |
-| **nbenchmark-host** | Host mode for dedicated benchmark projects - attribute-based discovery, CLI flags, dependency injection, and CI/CD regression detection |
-| **nbenchmark-reporters** | Reporter pipeline for console, JSON, Markdown, and CSV output, plus custom reporter creation |
-| **nbenchmark-troubleshooting** | Diagnosing analyzer warnings, incorrect results, discovery issues, and tuning measurement parameters |
+| **nbenchmark-host** | Host mode for dedicated benchmark projects - attribute-based discovery, CLI flags, `[IsolatedProcess]`, dependency injection, and CI/CD regression detection |
+| **nbenchmark-reporters** | Reporter pipeline for console, JSON, Markdown, and CSV output, report detail levels, plus custom reporter creation |
+| **nbenchmark-integration** | Enforce performance thresholds as xUnit, NUnit, or MSTest tests - attributes, `PerformanceAssert`, and baseline regression checks |
+| **nbenchmark-troubleshooting** | Diagnosing analyzer diagnostics (NB0001-NB0010), incorrect results, discovery issues, and tuning measurement parameters |
 
 ## Installation
 
@@ -33,6 +34,7 @@ mkdir -p .claude/skills
 cp -r skills/nbenchmark .claude/skills/
 cp -r skills/nbenchmark-host .claude/skills/
 cp -r skills/nbenchmark-reporters .claude/skills/
+cp -r skills/nbenchmark-integration .claude/skills/
 cp -r skills/nbenchmark-troubleshooting .claude/skills/
 ```
 
@@ -44,6 +46,7 @@ mkdir -p .opencode/skills
 cp -r skills/nbenchmark .opencode/skills/
 cp -r skills/nbenchmark-host .opencode/skills/
 cp -r skills/nbenchmark-reporters .opencode/skills/
+cp -r skills/nbenchmark-integration .opencode/skills/
 cp -r skills/nbenchmark-troubleshooting .opencode/skills/
 ```
 

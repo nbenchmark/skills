@@ -1,263 +1,207 @@
 ---
 name: nbenchmark-reporters
 nbenchmarkVersion: v0.1.0
-lastVerified: 2026-06-09
-description: Guide for NBenchmark's reporter pipeline - outputting benchmark results as console tables, JSON, Markdown, CSV, or custom formats. Use when the user wants to save results to files, display rich console output, or build a custom reporter.
+lastVerified: 2026-06-12
+description: NBenchmark output and reporting. Use when the user wants console, JSON, Markdown, or CSV output, wants to control report detail levels (Simple vs Advanced), stack multiple reporters, write file output to a directory, or implement and register a custom IReporter. For running benchmarks see the core nbenchmark skill; for the --reporter/--output/--detail CLI flags see nbenchmark-host.
 ---
 
 # NBenchmark Reporters
 
-Reporters are plug-ins that write `BenchmarkResult` collections to a sink. All built-in reporters implement `IReporter` and are registered in the `ReporterRegistry`.
+Reporters turn `IReadOnlyList<BenchmarkResult>` into output. The core `NBenchmark` package includes file reporters (JSON, Markdown, CSV); the `NBenchmark.Reporters.Console` package adds the rich terminal table.
+
+| Reporter           | Package                        | Output                           |
+| ------------------ | ------------------------------ | -------------------------------- |
+| `ConsoleReporter`  | `NBenchmark.Reporters.Console` | Rich terminal table (+ progress) |
+| `JsonReporter`     | `NBenchmark` (core)            | JSON file per run                |
+| `MarkdownReporter` | `NBenchmark` (core)            | Markdown table file              |
+| `CsvReporter`      | `NBenchmark` (core)            | CSV file                         |
 
 ## When to use this skill
 
-User asks to:
-
-- Output benchmark results to a file (JSON, Markdown, CSV)
-- Display results as a console table
-- Create a custom reporter
-- Use reporters with Suite mode or Host mode
-- Configure CLI reporter flags
-- Register a new reporter globally
-
-## IReporter interface
-
-```csharp
-public interface IReporter
-{
-    string Name { get; }
-    Task ReportAsync(IReadOnlyList<BenchmarkResult> results, CancellationToken ct = default);
-}
-```
+- Print results to the console
+- Write JSON/Markdown/CSV files
+- Stack multiple reporters in one run
+- Choose between Simple and Advanced detail
+- Write a custom reporter and expose it via `--reporter`
 
 ## Attaching reporters
 
-### Suite mode
+All three modes accept `IReporter` instances. Reporters are **stackable** — call `WithReporter` more than once.
 
 ```csharp
-var results = await new BenchmarkSuite("MySuite")
-    .Add("method1", () => Method1())
-    .Add("method2", () => Method2())
-    .WithReporter(new JsonReporter("./results"))
-    .WithReporter(new MarkdownReporter("results.md"))
-    .WithReporter(new CsvReporter("results.csv"))
-    .RunAsync();
-```
+using NBenchmark;
+using NBenchmark.Reporters;          // file reporters + IReporter
+using NBenchmark.Reporters.Console;  // ConsoleReporter
 
-### Host mode
-
-```csharp
-await BenchmarkHost.Create(args)
-    .AddFromAssembly<MyBenchmarks>()
+await new BenchmarkSuite("Demo")
+    .Add("A", () => DoA())
+    .Add("B", () => DoB())
     .WithReporter(new ConsoleReporter())
-    .WithReporter(new MarkdownReporter("results.md"))
+    .WithReporter(new MarkdownReporter("results/"))
+    .WithReporter(new JsonReporter("results/"))
     .RunAsync();
 ```
 
-### Host mode via CLI
+In Host mode, attach via code or the `--reporter` CLI flag (`json`, `markdown`, `csv`, `console`). See the `nbenchmark-host` skill / its CLI reference.
 
-```bash
-dotnet run -- --reporter json --reporter markdown --output ./results
-```
-
-CLI reporters are added before programmatic `WithReporter` reporters and are run first.
-
-### Quick mode (single result via extensions)
+## Console output (single result)
 
 ```csharp
-var result = Benchmark.Run(() => MyMethod());
-await result.ToMarkdownAsync("benchmark.md");
-await result.ToJsonAsync("./output");
-await result.ToCsvAsync("benchmark.csv");
-await result.PrintAsync(); // Requires NBenchmark.Console
+result.Print();              // plain-text summary, core package
+await result.PrintAsync();   // rich table, requires NBenchmark.Reporters.Console
 ```
 
-## ReporterRegistry
+`ConsoleBenchmarkProgress(measuredIterations, warmupIterations)` (console package) renders live progress when passed to `WithProgress(...)`.
 
-The `ReporterRegistry` is the global registry for constructing reporters by name.
+## File reporters
+
+All file reporters share the constructor shape `(string outputDirectory = ".", string? fileName = null, ReportDetail detail = ReportDetail.Simple)`:
 
 ```csharp
-// Check available reporters
-foreach (var info in ReporterRegistry.Available)
-    Console.WriteLine($"{info.Name}: {info.Description}");
-
-// Resolve by name
-if (ReporterRegistry.TryCreate("markdown", "./output", out var reporter))
-    await reporter.ReportAsync(results);
+new JsonReporter("results/");
+new MarkdownReporter("results/", "comparison.md");
+new CsvReporter("results/", detail: ReportDetail.Advanced);
 ```
 
-### Seed reporters (in NBenchmark core)
+- `outputDirectory` **must be under the current working directory** (validated; a path outside CWD throws). It is created automatically.
+- When `fileName` is null, a timestamped name with a 3-digit counter is generated:
+  - Markdown / CSV: `benchmark-results-{yyyyMMdd-HHmmss}-{NNN}.{md|csv}`
+  - JSON: `benchmarks-{yyyyMMdd-HHmmss}-{NNN}.json` (note the different prefix)
 
-| Name       | Class              | Default output                                         |
-| ---------- | ------------------ | ------------------------------------------------------ |
-| `json`     | `JsonReporter`     | `benchmarks-{timestamp}-{counter}.json` in current dir |
-| `markdown` | `MarkdownReporter` | `benchmark-results-{timestamp}.md` in current dir      |
-| `csv`      | `CsvReporter`      | `benchmark-results.csv` in current dir                 |
+### Single-result extension methods
 
-The `console` reporter is provided by the optional `NBenchmark.Console` package and self-registers via `[ModuleInitializer]`.
-
-### Registering custom reporters
+On any `BenchmarkResult` (core package):
 
 ```csharp
-ReporterRegistry.Register("my-reporter", "Custom output format",
-    outputDir => new MyReporter(outputDir));
-
-// Then use via CLI
-// dotnet run -- --reporter my-reporter
+await result.ToMarkdownAsync("results/");   // (outputDir = ".", fileName = null)
+await result.ToJsonAsync("results/");
+await result.ToCsvAsync("results.csv");
 ```
 
-The factory receives the output directory when `--output` is used, or `null` when used programmatically.
+### JSON envelope
 
-## Built-in reporters
-
-### ConsoleReporter (NBenchmark.Console package)
-
-```xml
-<PackageReference Include="NBenchmark.Console" Version="*" />
-```
-
-```csharp
-using NBenchmark.Console;
-
-// Add to host
-await BenchmarkHost.Create(args)
-    .AddFromAssembly<MyBenchmarks>()
-    .WithReporter(new ConsoleReporter())
-    .RunAsync();
-
-// Add to suite
-var results = await new BenchmarkSuite("MySuite")
-    .Add("a", () => A())
-    .Add("b", () => B())
-    .WithReporter(new ConsoleReporter())
-    .RunAsync();
-
-// Quick mode
-await Benchmark.Run(() => MyMethod()).PrintAsync();
-```
-
-Features: Spectre.Console table with rounded borders, colour-coded names (green/yellow/red by ratio), significance indicators (green checkmark ✓, grey tilde ~), ratio colours, bar chart for multi-benchmark runs, summary footer.
-
-### JsonReporter
-
-```csharp
-new JsonReporter()           // writes to ./benchmarks-{timestamp}-{counter}.json
-new JsonReporter("./output") // writes to ./output/benchmarks-{timestamp}-{counter}.json
-```
-
-Output format uses `System.Text.Json` with camelCase, indented:
+`JsonReporter` writes indented camelCase JSON with enums as camelCase strings, wrapped in an envelope. JSON **always** contains the full record regardless of detail level:
 
 ```json
 {
-  "generatedAt": "2026-01-15T10:30:00Z",
-  "results": [
-    {
-      "name": "MyMethod",
-      "mean": 1234.5,
-      "median": 1200.0,
-      ...
-    }
-  ]
+  "generatedAt": "2026-06-12T15:00:00+00:00",
+  "detail": "simple",
+  "results": [ { "name": "QuickSort", "median": 1234.5, "significanceVerdict": "significant", ... } ]
 }
 ```
 
-File names are timestamped with a monotonically incrementing counter, safe for multiple runs without overwriting.
+## Detail levels
 
-### MarkdownReporter
+`ReportDetail` is `{ Simple, Advanced }`. Simple is the default. Set it per reporter (`detail:` ctor arg), per suite (`.WithDetail(...)`), per host (`.WithDetail(...)`), or via `--detail simple|advanced`.
 
-```csharp
-new MarkdownReporter()               // writes to benchmark-results-{timestamp}.md
-new MarkdownReporter("results.md")   // uses the exact path provided
-```
+### Simple — 10-column table
 
-Output format:
+| Column    | Meaning                                       |
+| --------- | --------------------------------------------- |
+| Benchmark | Name                                          |
+| Median    | Median timing (primary metric)                |
+| Mean      | Arithmetic mean                               |
+| Error     | ±Margin of error on the mean (with % of mean) |
+| StdDev    | Sample standard deviation                     |
+| P95       | 95th percentile                               |
+| P99       | 99th percentile                               |
+| Ratio     | Speed relative to baseline                    |
+| Sig       | `✓` significant, `✗` not significant, `-` n/a |
+| Alloc/op  | Mean bytes/op, or `-` if not measured         |
 
-```markdown
-## Benchmark Results
+### Advanced — same table + per-benchmark stats block
 
-_Run at 2026-01-15 10:30:00 UTC - 25 warmup / 200 measured_
+Adds: outliers removed + method, range (Min–Max), quartiles (Q1/Q3/IQR), fences (IqrFence only), pre/post-trim iteration counts + warmup, full CI bounds + margin %, CV %, skewness, kurtosis, MAD, N, and (when measured) allocation median/P95/max.
 
-| Benchmark  | Median   | Mean     |    Error |  StdDev |      P95 |      P99 |  Ratio | Sig | Alloc/op |
-| ---------- | -------- | -------- | -------: | ------: | -------: | -------: | -----: | --: | -------: |
-| QuickSort  | 1.24 µs  | 1.30 µs  | ±0.05 µs | 0.12 µs |  1.50 µs |  1.80 µs |  1.00x |   - |     64 B |
-| BubbleSort | 15.30 ms | 15.50 ms | ±0.50 ms | 2.10 ms | 18.00 ms | 20.00 ms | 12.35x |   ✓ |    128 B |
+### Per-reporter behaviour
 
-_Error = ±95% confidence interval half-width on the mean._
-```
+| Reporter | Simple               | Advanced                                                   |
+| -------- | -------------------- | ---------------------------------------------------------- |
+| Console  | Table only           | Table + stats block below each row                         |
+| Markdown | Table only           | Table + details section after the table                    |
+| CSV      | Core columns (18)    | Extended columns (34) incl. quartiles, fences, shape stats |
+| JSON     | Full record (always) | Full record (always)                                       |
 
-Time values use `BenchmarkFormatter.FormatNs` (auto-scaling ns/µs/ms/s). Bytes use `FormatBytes` (B/KB/MB). Columns: Benchmark, Median, Mean, Error, StdDev, P95, P99, Ratio, Sig, Alloc/op.
+## Custom reporters
 
-### CsvReporter
-
-```csharp
-new CsvReporter()                // writes to benchmark-results.csv
-new CsvReporter("./output.csv")  // writes to output.csv
-```
-
-Columns: `Name, Median, Mean, StdDev, StdErr, MarginOfError, CiLower, CiUpper, ConfidenceLevel, CoefficientOfVariation, P95, P99, Ratio, Significant, AllocPerOp`.
-
-CSV uses double-quote escaping for names and significance values. Null/missing values are written as `null`.
-
-## BenchmarkTable.Build
-
-Reporters build display tables via `BenchmarkTable.Build(results)`. This is also useful for programmatic access.
+Implement `IReporter` from `NBenchmark.Reporters`. The interface has **three** members — note `Detail` (a settable property the host/suite assigns based on `--detail` / `WithDetail`):
 
 ```csharp
-var table = BenchmarkTable.Build(results);
-
-foreach (var row in table.Rows)
-{
-    Console.WriteLine($"{row.Name}: {row.Ratio:F2}x, sig={row.SignificanceLabel}");
-}
-
-// Table metadata
-Console.WriteLine($"Total duration: {table.TotalDuration}");
-Console.WriteLine($"Outlier mode: {table.OutlierMode}");
-```
-
-`BenchmarkTable` selects the baseline (first explicit `IsBaseline`, or the benchmark with the fastest median), computes ratios, and orders rows by median ascending.
-
-## Output path safety
-
-`PathValidation.ValidateOutputPath` ensures the resolved full path is under the current working directory. Throws `ArgumentException` for paths outside the working directory. All built-in reporters use this validation.
-
-## Multiple reporters
-
-Attach multiple reporters to the same run:
-
-```csharp
-.WithReporter(new ConsoleReporter())
-.WithReporter(new MarkdownReporter("results.md"))
-.WithReporter(new JsonReporter("./output"))
-.WithReporter(new CsvReporter("results.csv"))
-```
-
-All reporters run sequentially in the order they were added. CLI `--reporter` flags are inserted at position 0 and run first.
-
-## Custom reporter example
-
-```csharp
+using NBenchmark;
 using NBenchmark.Reporters;
 
 public sealed class MyReporter : IReporter
 {
     public string Name => "my-reporter";
+    public ReportDetail Detail { get; set; } = ReportDetail.Simple;
 
     public async Task ReportAsync(
         IReadOnlyList<BenchmarkResult> results,
-        CancellationToken ct = default)
+        CancellationToken cancellationToken = default)
     {
-        var table = BenchmarkTable.Build(results);
-        // Write custom output...
-        foreach (var row in table.Rows.Where(r => !r.Errored))
-        {
-            await File.AppendAllTextAsync("output.txt",
-                $"{row.Name}: {row.Median:F0} ns{Environment.NewLine}", ct);
-        }
+        foreach (var r in results.Where(r => !r.Errored))
+            Console.WriteLine($"{r.Name}: median={r.Median:F0}ns");
     }
 }
-
-// Register for CLI use
-ReporterRegistry.Register("my-reporter", "Custom output format",
-    _ => new MyReporter());
 ```
+
+Attach with `.WithReporter(new MyReporter())`.
+
+### Build comparison tables with `BenchmarkTable`
+
+For ratio/significance tables, use `BenchmarkTable.Build(results)` instead of reimplementing the logic:
+
+- Baseline selection — first `[Baseline]`, else fastest median
+- `row.Ratio` — `result.Median / baseline.Median` (`NaN` for errored / single-benchmark runs)
+- `row.SignificanceLabel` — `"✓"`, `"✗"`, or `""`
+- Rows sorted by median ascending
+- Run metadata: `table.RunAtUtc`, `WarmupIterations`, `MeasuredIterations`, `ConfidenceLevel`, `OutlierMode`, `TotalDuration`
+
+```csharp
+public async Task ReportAsync(IReadOnlyList<BenchmarkResult> results, CancellationToken ct = default)
+{
+    var table = BenchmarkTable.Build(results);
+    foreach (var row in table.Rows)
+    {
+        if (row.Errored) { Console.WriteLine($"{row.Name}: ERROR - {row.ErrorMessage}"); continue; }
+        var sig = row.SignificanceLabel is "" ? "" : $" {row.SignificanceLabel}";
+        Console.WriteLine($"{row.Name}{sig}: {row.Median:F0} ns  ratio={row.Ratio:F2}x");
+    }
+}
+```
+
+### Register for the `--reporter` CLI flag
+
+Register with the global `ReporterRegistry` (namespace `NBenchmark.Reporters`). The factory takes **two** arguments — the output directory and the detail level:
+
+```csharp
+using System.Runtime.CompilerServices;
+using NBenchmark.Reporters;
+
+internal static class MyReporterRegistration
+{
+    [ModuleInitializer]
+    internal static void Register() =>
+        ReporterRegistry.Register(
+            "my-reporter",
+            "Custom output",
+            (dir, detail) => new MyReporter { Detail = detail });
+}
+```
+
+Registry API:
+
+| Member      | Signature                                                                                   |
+| ----------- | ------------------------------------------------------------------------------------------- |
+| `Register`  | `Register(string name, string description, Func<string?, ReportDetail, IReporter> factory)` |
+| `TryCreate` | `TryCreate(string name, string? outputDir, ReportDetail detail, out IReporter? reporter)`   |
+| `Available` | `IReadOnlyList<ReporterInfo>` (`ReporterInfo(string Name, string Description)`)             |
+
+`Register` throws `InvalidOperationException` if the name is already taken (case-insensitive). Packages that reference `NBenchmark.*` are auto-loaded so their `[ModuleInitializer]` registrations run; the console package self-registers `console` this way. Seed reporter descriptions: `"JSON file output (one file per run)"`, `"Markdown table output"`, `"CSV file output"`.
+
+## Related skills
+
+- **nbenchmark** — running benchmarks, `BenchmarkResult` fields
+- **nbenchmark-host** — `--reporter`, `--output`, `--detail` CLI flags
+- **nbenchmark-integration** — assertion-style reporting inside test frameworks
+- **nbenchmark-troubleshooting** — output/path issues, interpreting warnings
