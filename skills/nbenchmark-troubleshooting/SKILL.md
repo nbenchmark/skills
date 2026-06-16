@@ -33,7 +33,7 @@ Install `NBenchmark.Analyzers` for compile-time diagnostics (ships analyzers + c
 | NB0006 | Multiple `[Benchmark(Baseline = true)]` in one class       | Error    | Keep exactly one baseline                             |
 | NB0007 | Duplicate lifecycle method                                 | Error    | One method per lifecycle attribute                    |
 | NB0008 | `[Benchmark]` `Iterations`/`WarmupIterations` out of range | Error    | 0–100,000 / 0–10,000 (or `-1` for default)            |
-| NB0009 | `MeasurementOptions` value out of range                    | Error    | Fix `Iterations`/`WarmupIterations`/`ConfidenceLevel` |
+| NB0009 | `MeasurementOptions` value out of range                    | Error    | Fix `Iterations`/`WarmupIterations`/`OpsPerSample`/`ConfidenceLevel` |
 | NB0010 | Throwaway lambda body (`Action` overloads)                 | Warning  | Return a value or add a side effect                   |
 
 `Error` (NB0002/0003 break discovery; NB0006–0009 are definite mistakes) blocks the build. NB0001/NB0010 are `Warning`; NB0004 is `Info` (conservative heuristic, may have false positives).
@@ -59,9 +59,9 @@ dotnet_diagnostic.NB0004.severity = none
 | Symptom                    | Cause                                                                                  | Fix                                                                        |
 | -------------------------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | Result shows `0 ns`        | **Dead-code elimination** — the body has no observable side effect                     | Use a value-returning overload (`Func<T>`) or add a side effect; see below |
-| All results zeroed         | Dry-run active (`--dry-run`, or `Iterations=0` **and** `WarmupIterations=0`)           | Remove `--dry-run`; set `Iterations > 0`                                   |
-| `MarginOfError` is `±0 ns` | Only one sample (`n < 2`), or all samples identical (timer coarser than the operation) | Increase iterations; run on a higher-resolution timer                      |
-| `Sig` column blank / `-`   | Fewer than 2 samples per group for the Mann-Whitney U test                             | Increase iterations; ensure ≥2 non-errored benchmarks                      |
+| All results zeroed         | Dry-run active (`--dry-run`, or `Iterations = 0`)                                       | Remove `--dry-run`; leave `Iterations` unset (auto) or set `Iterations > 0`             |
+| `MarginOfError` is `±0 ns` | Pinned to a single sample (`n < 2`), or all samples identical (timer coarser than the operation) | Leave the sample count auto; let ops-per-sample auto-calibrate (or pin `--ops-per-sample`) so a batch beats timer resolution |
+| `Sig` column blank / `-`   | Fewer than 2 samples per group for the Mann-Whitney U test                             | Don't pin `--iterations`/`--min-samples` below 2; ensure ≥2 non-errored benchmarks      |
 
 ### Preventing dead-code elimination
 
@@ -78,9 +78,9 @@ Benchmark.Run(() => int.Parse("12345"));
 
 | Symptom                       | Likely cause                                                                     | Fix                                                                                                          |
 | ----------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| Large Error / wide CI         | Too few iterations                                                               | `.WithIterations(500)` or `--iterations 500`                                                                 |
+| Large Error / wide CI         | CI target not tight enough, or sampling hit its ceiling                          | Lower `--ci-target` (e.g. `0.01`), raise `--max-samples`, or `--auto-tune thorough`                          |
 | Large Error / wide CI         | OS scheduling noise                                                              | Keep/confirm `OutlierMode.IqrFence` (the default)                                                            |
-| Large Error / wide CI         | Laptop thermal throttling                                                        | `.WithWarmup(50)`, run plugged in, fewer iterations for a shorter run                                        |
+| Large Error / wide CI         | Laptop thermal throttling                                                        | Raise `--min-warmup`, run plugged in, cap the run with `--max-tuning-time`                                   |
 | High StdDev                   | GC / allocation noise                                                            | `.WithAllocations()` to diagnose; for GC-focused benchmarks, consider disabling `ForceGcBeforeEachIteration` |
 | Bimodal warning in `Warnings` | Trimmed slow samples form a tight secondary cluster (a second execution profile) | Investigate a cold/warm path split; isolate with `[IsolatedProcess]` (Host mode) or stabilize inputs         |
 
@@ -116,8 +116,8 @@ NBenchmark runs a two-sided **Mann-Whitney U test** against the baseline when `E
 
 | Goal                                   | Setting                                                                     |
 | -------------------------------------- | --------------------------------------------------------------------------- |
-| Tighter confidence interval            | More `Iterations` (500–1000+)                                               |
-| Stable sub-microsecond timing          | More `Iterations`; default per-iteration timing keeps sub-100 ns resolution |
+| Tighter confidence interval            | Lower `--ci-target` (e.g. `0.01`) or `--auto-tune thorough`; or pin a larger `--iterations` |
+| Stable sub-microsecond timing          | Let ops-per-sample auto-calibrate (or pin `--ops-per-sample`); the batch spans ~1 µs so one timer read beats sub-100 ns resolution |
 | Cold-start / JIT cost                  | `WarmupIterations = 0` (or `1`)                                             |
 | Stronger evidence before "significant" | Lower `SignificanceLevel` (e.g. `0.01`) / `--alpha 0.01`                    |
 | Wider/more conservative Error          | Higher `ConfidenceLevel` (e.g. `0.99`)                                      |

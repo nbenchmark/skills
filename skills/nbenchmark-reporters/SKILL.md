@@ -51,7 +51,7 @@ result.Print();              // plain-text summary, core package
 await result.PrintAsync();   // rich table, requires NBenchmark.Reporters.Console
 ```
 
-`ConsoleBenchmarkProgress(measuredIterations, warmupIterations)` (console package) renders live progress when passed to `WithProgress(...)`.
+`ConsoleBenchmarkProgress()` (console package) renders a live progress bar when passed to `WithProgress(...)`. With auto-resolved counts the bar tracks the `MaxSamples` ceiling; pin `WithWarmup`/`WithIterations` for an exact total.
 
 ## File reporters
 
@@ -90,6 +90,8 @@ await result.ToCsvAsync("results.csv");
 }
 ```
 
+Each result also carries an `autoTune` object (resolved warmup/samples/ops, `warmupStop`/`sampleStop` reasons, achieved CI half-width, tuning time), or `null` for dry-run and errored results.
+
 ## Detail levels
 
 `ReportDetail` is `{ Simple, Advanced }`. Simple is the default. Set it per reporter (`detail:` ctor arg), per suite (`.WithDetail(...)`), per host (`.WithDetail(...)`), or via `--detail simple|advanced`.
@@ -111,15 +113,15 @@ await result.ToCsvAsync("results.csv");
 
 ### Advanced — same table + per-benchmark stats block
 
-Adds: outliers removed + method, range (Min–Max), quartiles (Q1/Q3/IQR), fences (IqrFence only), pre/post-trim iteration counts + warmup, full CI bounds + margin %, CV %, skewness, kurtosis, MAD, N, and (when measured) allocation median/P95/max.
+Adds: outliers removed + method, range (Min–Max), quartiles (Q1/Q3/IQR), fences (IqrFence only), pre/post-trim sample counts + warmup, full CI bounds + margin %, CV %, skewness, kurtosis, MAD, N, (when measured) allocation median/P95/max, plus an `auto-tuned: …` line summarising the adaptive loop's decisions (resolved samples × ops, warmup length, achieved CI half-width).
 
 ### Per-reporter behaviour
 
 | Reporter | Simple               | Advanced                                                   |
 | -------- | -------------------- | ---------------------------------------------------------- |
-| Console  | Table only           | Table + stats block below each row                         |
-| Markdown | Table only           | Table + details section after the table                    |
-| CSV      | Core columns (18)    | Extended columns (34) incl. quartiles, fences, shape stats |
+| Console  | Table only           | Table + stats block + `auto-tuned:` line below each row    |
+| Markdown | Table only           | Table + details section (incl. `auto-tuned:` line)         |
+| CSV      | 22 columns           | 44 columns incl. quartiles, fences, shape + adaptive stats |
 | JSON     | Full record (always) | Full record (always)                                       |
 
 ## Custom reporters
@@ -156,6 +158,7 @@ For ratio/significance tables, use `BenchmarkTable.Build(results)` instead of re
 - `row.SignificanceLabel` — `"✓"`, `"✗"`, or `""`
 - Rows sorted by median ascending
 - Run metadata: `table.RunAtUtc`, `WarmupIterations`, `MeasuredIterations`, `ConfidenceLevel`, `OutlierMode`, `TotalDuration`
+- `row.AutoTune` — the per-benchmark adaptive-loop diagnostic (`AutoTuneDiagnostic?`; `null` on dry-run/errored)
 
 ```csharp
 public async Task ReportAsync(IReadOnlyList<BenchmarkResult> results, CancellationToken ct = default)

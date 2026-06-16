@@ -77,8 +77,8 @@ The attributes implement `IPerformanceThresholds` and expose **all ten** propert
 | `MaxAllocatedBytes`  | `long`        | `-1` (disabled)       | Max mean bytes/op; implicitly enables allocation tracking |
 | `BaselinePath`       | `string?`     | `null`                | JSON baseline file to compare against                     |
 | `MaxSlowdownRatio`   | `double`      | `1.2`                 | Max slowdown vs baseline (1.2 = +20%)                     |
-| `Iterations`         | `int`         | `0` (use default 200) | Measured-iteration override                               |
-| `WarmupIterations`   | `int`         | `0` (use default 25)  | Warmup override                                           |
+| `Iterations`         | `int`         | `0` (use default: auto) | Measured-sample override (`>0` pins)                    |
+| `WarmupIterations`   | `int`         | `0` (use default: auto) | Warmup override (`>0` pins)                             |
 | `MeasureAllocations` | `bool`        | `false`               | Enable allocation tracking                                |
 | `OutlierMode`        | `OutlierMode` | `IqrFence`            | Outlier strategy                                          |
 | `ConfidenceLevel`    | `double`      | `0.95`                | Confidence level for the Error column                     |

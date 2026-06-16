@@ -117,8 +117,10 @@ suite.Add("d", async () => await ComputeSomethingAsync()); // async returning
 | Method                                                 | What it sets                                          |
 | ------------------------------------------------------ | ----------------------------------------------------- |
 | `WithBaseline(name)`                                   | Reference benchmark for ratio/significance            |
-| `WithIterations(n)`                                    | Measured iterations (default 200)                     |
-| `WithWarmup(n)`                                        | Warmup iterations (default 25)                        |
+| `WithIterations(n)`                                    | Pin measured samples (default: auto)                  |
+| `WithWarmup(n)`                                        | Pin warmup samples (default: auto)                    |
+| `WithOpsPerSample(n)`                                  | Pin ops-per-sample / K (default: auto-calibrated)     |
+| `WithAutoTune(preset)` / `WithAutoTune(options)`       | Bound/steer the adaptive loop                         |
 | `WithAllocations(bool = true)`                         | Per-iteration allocation tracking                     |
 | `WithOutlierMode(mode)`                                | Outlier trimming strategy (default `IqrFence`)        |
 | `WithConfidenceLevel(level)`                           | Confidence level for the Error column (default 0.95)  |
@@ -152,8 +154,10 @@ var results = await new BenchmarkSuite("JSON Parsers")
 
 | Property                     | Default                | Valid range |
 | ---------------------------- | ---------------------- | ----------- |
-| `Iterations`                 | `200`                  | 0–100,000   |
-| `WarmupIterations`           | `25`                   | 0–10,000    |
+| `Iterations`                 | `null` (auto)          | 0–100,000    |
+| `WarmupIterations`           | `null` (auto)          | 0–10,000     |
+| `OpsPerSample`               | `null` (auto)          | 1–16,777,216 |
+| `AutoTune`                   | `AutoTuneOptions.Default` | —         |
 | `ForceGcBeforeEachIteration` | `true`                 | —           |
 | `MeasureAllocations`         | `false`                | —           |
 | `OutlierMode`                | `OutlierMode.IqrFence` | —           |
@@ -162,7 +166,7 @@ var results = await new BenchmarkSuite("JSON Parsers")
 | `SignificanceLevel`          | `0.05`                 | >0 and <1   |
 | `ForceGcBetweenBenchmarks`   | `true`                 | —           |
 
-`Iterations = 0` **and** `WarmupIterations = 0` together signal a dry run: the body is not invoked and results are zeroed.
+`Iterations = 0` signals a dry run: the measured loop is skipped and results are zeroed (the body isn't invoked unless a positive `WarmupIterations` is pinned). `--dry-run` sets both counts to `0`.
 
 See [references/measurement-options.md](references/measurement-options.md) for a full explanation of every option, outlier modes, and tuning advice.
 
@@ -206,7 +210,7 @@ Always use `RunAsync` / `RunAsync<T>` (or the `Func<Task>` `Add` overloads) for 
 
 ### Very fast operations
 
-Increase `Iterations` (1000+) for stable sub-microsecond measurements. Per-iteration timing preserves native sub-100 ns stopwatch resolution.
+For fast, side-effect-free bodies the loop auto-calibrates ops-per-sample (K) so each timed sample spans enough work to beat timer resolution, dividing the per-op time back down. Pin it with `WithOpsPerSample(n)` (or `--ops-per-sample n`), or pin a larger `Iterations` budget, when you want a fixed sub-microsecond measurement.
 
 ### Detecting errors
 

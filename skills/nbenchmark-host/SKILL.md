@@ -41,7 +41,7 @@ using NBenchmark.Attributes;
 await BenchmarkHost.Create(args)
     .AddFromAssembly<StringBenchmarks>()
     .WithReporter(new ConsoleReporter())
-    .WithProgress(new ConsoleBenchmarkProgress(200, 25))
+    .WithProgress(new ConsoleBenchmarkProgress())
     .RunAsync();
 
 public class StringBenchmarks
@@ -78,6 +78,8 @@ Marks a **public instance** method (sync, `Task`, or `Task<T>`). Return a value 
 | `WarmupIterations` | `int`     | `-1` (unset) | Per-method warmup override (0–10,000)     |
 
 `Iterations`/`WarmupIterations` use `-1` as the "unset" sentinel (named attribute arguments can't be nullable value types). Set a value ≥ 0 to override the host options for that method only. Helpers `HasIterationsOverride` / `HasWarmupIterationsOverride` report whether an override is present.
+
+`OpsPerSample` is **not** a per-method attribute argument — pin it host-wide with `.WithOpsPerSample(n)` or `--ops-per-sample n`. Only `Iterations` and `WarmupIterations` are pinnable per method.
 
 ```csharp
 [Benchmark(Baseline = true, Description = "current production")]
@@ -191,7 +193,7 @@ dotnet run -- --dry-run     # wire up everything, never invoke the body
 dotnet run -- --detail advanced
 ```
 
-Frequently used flags: `--filter`, `--iterations`, `--warmup`, `--confidence`, `--alpha`, `--reporter`, `--output`, `--order`, `--seed`, `--detail`, `--list`, `--dry-run`, `--threshold-pct`, `--help`/`-h`.
+Frequently used flags: `--filter`, `--iterations`, `--warmup`, `--auto-tune`, `--ops-per-sample`, `--ci-target`, `--min-samples`, `--max-samples`, `--confidence`, `--alpha`, `--reporter`, `--output`, `--order`, `--seed`, `--detail`, `--list`, `--dry-run`, `--threshold-pct`, `--help`/`-h`.
 
 See [references/cli.md](references/cli.md) for every flag, exit codes, and CI examples.
 

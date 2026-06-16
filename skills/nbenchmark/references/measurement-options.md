@@ -14,7 +14,7 @@ var options = new MeasurementOptions
 };
 ```
 
-Constants: `MeasurementOptions.MinIterations` (0), `MeasurementOptions.MaxIterations` (100,000), `MeasurementOptions.MaxWarmupIterations` (10,000). `MeasurementOptions.Default` is a ready-made default instance.
+`Iterations`, `WarmupIterations`, and `OpsPerSample` are `int?`: `null` (the default) means auto-resolve. Constants: `MeasurementOptions.MinIterations` (0), `MeasurementOptions.MaxIterations` (100,000), `MeasurementOptions.MaxWarmupIterations` (10,000), `MeasurementOptions.MaxOpsPerSampleLimit` (16,777,216). `MeasurementOptions.Default` is a ready-made default instance (all three counts `null`).
 
 ## How each mode sets options
 
@@ -26,13 +26,21 @@ Constants: `MeasurementOptions.MinIterations` (0), `MeasurementOptions.MaxIterat
 
 ## Options
 
-### Iterations — default `200`, range `0`–`100,000`
+### Iterations — `int?`, default `null` (auto), range `0`–`100,000`
 
-Number of measured iterations. More iterations → tighter confidence interval (smaller Error) at the cost of run time. Increase to 500–1000 when the Error column is large relative to the mean, or for sub-microsecond operations. CLI: `--iterations <n>`.
+Measured-sample count. `null` (the default) lets the adaptive loop stream samples until the confidence interval on the mean meets its relative-width target. `0` is a dry-run (see below). A positive value pins an exact sample count — use it for fully reproducible runs, or raise it for sub-microsecond operations when you want a fixed budget. CLI: `--iterations <n>`.
 
-### WarmupIterations — default `25`, range `0`–`10,000`
+### WarmupIterations — `int?`, default `null` (auto), range `0`–`10,000`
 
-Iterations run (and discarded) before measurement so the JIT compiles the body and CPU caches warm up. Set to `0`/`1` to measure cold-start behaviour. Increase (e.g. 50) when laptops thermal-throttle or there are many generic instantiations to JIT. CLI: `--warmup <n>`.
+Warmup samples run (and discarded) before measurement so the JIT compiles the body and CPU caches warm up. `null` (the default) lets a plateau detector end warmup once timings stop improving. `0` skips warmup to measure cold-start behaviour. A positive value pins an exact warmup count. CLI: `--warmup <n>`.
+
+### OpsPerSample — `int?`, default `null` (auto), range `1`–`16,777,216`
+
+How many times the body is invoked per timed sample (**K**). `null` (the default) auto-calibrates K for fast, side-effect-free bodies so a single timer read spans roughly `AutoTune.TargetSampleDurationNs` of work; the reported per-op time and allocations are divided back down by K. A positive value pins K. Calibration is skipped when an iteration setup/teardown is present (the body isn't safely repeatable), leaving K at 1. CLI: `--ops-per-sample <n>`.
+
+### AutoTune — default `AutoTuneOptions.Default`
+
+Bounds and steers the adaptive loop: `MinWarmup`/`MaxWarmup`, `WarmupEpsilon`, `PlateauPatience`, `MinSamples`/`MaxSamples`, `CiTarget` (relative CI half-width target, default `0.025`), `TargetSampleDurationNs`, `MaxOpsPerSample`, `BatchSize`, and `MaxTuningTime` (overall wall-clock cap). Use a preset — `AutoTuneOptions.Quick`, `AutoTuneOptions.Default`, or `AutoTuneOptions.Thorough` — or build your own. Suite/Host: `.WithAutoTune(preset)` or `.WithAutoTune(options)`; CLI: `--auto-tune <default|quick|thorough>` plus `--ci-target`, `--min-samples`, `--max-samples`, `--min-warmup`, `--max-warmup`, `--max-tuning-time`.
 
 ### ForceGcBeforeEachIteration — default `true`
 
@@ -77,6 +85,8 @@ Runs a full gen-2 GC collection between benchmarks in a suite to prevent carry-o
 
 In Host mode, `[Benchmark(Iterations = 1000, WarmupIterations = 100)]` overrides the host-level options for that one method. Internally these use `-1` as the "unset" sentinel (range otherwise 0–100,000 / 0–10,000). See the `nbenchmark-host` skill.
 
+Only `Iterations` and `WarmupIterations` are pinnable per method. `OpsPerSample` is **not** exposed on `[Benchmark]` — pin it suite/host-wide with `.WithOpsPerSample(n)` or `--ops-per-sample n`.
+
 ## Dry run
 
-`Iterations = 0` **and** `WarmupIterations = 0` together are the dry-run signal: the body is not invoked and a zeroed result is returned. CLI `--dry-run` is exactly `--iterations 0 --warmup 0`. To invoke the body once as a smoke test, use `--iterations 1 --warmup 0` instead.
+`Iterations = 0` is the dry-run signal: the measured loop is skipped and a zeroed result is returned. With the default (auto) or `0` warmup the body is never invoked; a pinned positive `WarmupIterations` still runs that many warmup invocations first. CLI `--dry-run` is exactly `--iterations 0 --warmup 0`. To invoke the body once as a smoke test, use `--iterations 1 --warmup 0` instead.

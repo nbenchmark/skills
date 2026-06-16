@@ -76,14 +76,22 @@ Allocation fields are populated only when `MeasureAllocations = true`.
 |---|---|---|
 | `Errored` | `bool` | Whether the benchmark threw |
 | `ErrorMessage` | `string?` | Exception message if errored |
-| `MeasuredIterations` | `int` | Iterations after outlier trim |
-| `WarmupIterations` | `int` | Warmup iterations performed |
+| `MeasuredIterations` | `int` | Measured samples kept after outlier trim (auto-resolved unless pinned) |
+| `WarmupIterations` | `int` | Warmup samples performed (auto-resolved unless pinned) |
 | `TotalDuration` | `TimeSpan` | End-to-end wall clock incl. warmup + pre-measure GC + measured loop |
 | `MeasuredDuration` | `TimeSpan` | Measured loop only (incl. per-iteration setup/teardown/GC) |
 | `OutlierMode` | `OutlierMode` | Outlier strategy applied |
 | `Warnings` | `IReadOnlyList<string>` | Non-fatal notes (e.g. bimodal-distribution warning) |
 
 Contract: `MeasuredDuration <= TotalDuration`. Errored entries from pre-runner failures (e.g. suite setup) stay at `TimeSpan.Zero`.
+
+## Adaptive tuning
+
+| Field | Type | Description |
+|---|---|---|
+| `AutoTune` | `AutoTuneDiagnostic?` | What the adaptive loop resolved; `null` on dry-run and errored results |
+
+`AutoTuneDiagnostic` records `ResolvedWarmup`, `ResolvedSamples`, `OpsPerSample` (K), `TotalBodyInvocations`, `WarmupStop` (`WarmupStopReason`: `Settled` / `MaxCeiling` / `ExplicitCount` / `WallClockCap`), `SampleStop` (`SampleStopReason`: `CiTargetMet` / `MaxCeiling` / `ExplicitCount` / `WallClockCap`), `AchievedRelativeCiWidth`, and `TuningWallClock`. The `MeasuredIterations` and `WarmupIterations` fields above report the same resolved counts (after any outlier trim).
 
 ## Computed percentage helpers
 
