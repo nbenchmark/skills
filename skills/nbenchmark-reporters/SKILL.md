@@ -1,13 +1,13 @@
 ---
 name: nbenchmark-reporters
-nbenchmarkVersion: v0.1.0
-lastVerified: 2026-06-12
-description: NBenchmark output and reporting. Use when the user wants console, JSON, Markdown, or CSV output, wants to control report detail levels (Simple vs Advanced), stack multiple reporters, write file output to a directory, or implement and register a custom IReporter. For running benchmarks see the core nbenchmark skill; for the --reporter/--output/--detail CLI flags see nbenchmark-host.
+nbenchmarkVersion: v0.32.0
+lastVerified: 2026-07-21
+description: NBenchmark output and reporting. Use when the user wants console, JSON, Markdown, or CSV output, wants to control report detail levels (Simple / Standard / Advanced), stack multiple reporters, write file output to a directory, register a custom reporter via ReporterRegistry, or implement a custom IReporter or IMeasurementObserver. For running benchmarks see the core nbenchmark skill; for the --reporter/--output/--detail CLI flags see nbenchmark-host.
 ---
 
 # NBenchmark Reporters
 
-Reporters turn `IReadOnlyList<BenchmarkResult>` into output. The core `NBenchmark` package includes file reporters (JSON, Markdown, CSV); the `NBenchmark.Reporters.Console` package adds the rich terminal table.
+Reporters turn `IReadOnlyList<BenchmarkResult>` into output. The core `NBenchmark` package includes file reporters (JSON, Markdown, CSV) and the reporter/observer registries; the `NBenchmark.Reporters.Console` package adds the rich terminal table.
 
 | Reporter           | Package                        | Output                           |
 | ------------------ | ------------------------------ | -------------------------------- |
@@ -21,8 +21,9 @@ Reporters turn `IReadOnlyList<BenchmarkResult>` into output. The core `NBenchmar
 - Print results to the console
 - Write JSON/Markdown/CSV files
 - Stack multiple reporters in one run
-- Choose between Simple and Advanced detail
+- Choose between Simple, Standard, and Advanced detail
 - Write a custom reporter and expose it via `--reporter`
+- Subscribe to per-sample/per-phase telemetry via `IMeasurementObserver`
 
 ## Attaching reporters
 
@@ -42,20 +43,20 @@ await new BenchmarkSuite("Demo")
     .RunAsync();
 ```
 
-In Host mode, attach via code or the `--reporter` CLI flag (`json`, `markdown`, `csv`, `console`). See the `nbenchmark-host` skill / its CLI reference.
+In Harness mode, attach via code or the `--reporter` CLI flag (`json`, `markdown`, `csv`, `console`). See the `nbenchmark-host` skill / its CLI reference.
 
 ## Console output (single result)
 
 ```csharp
-result.Print();              // plain-text summary, core package
+result.Print();              // plain-text summary, core package (optional ReportDetail arg)
 await result.PrintAsync();   // rich table, requires NBenchmark.Reporters.Console
 ```
 
-`ConsoleBenchmarkProgress()` (console package) renders a live progress bar when passed to `WithProgress(...)`. With auto-resolved counts the bar tracks the `MaxSamples` ceiling; pin `WithWarmup`/`WithIterations` for an exact total.
+`new ConsoleBenchmarkProgress()` (console package, `IBenchmarkProgress`) renders a live progress bar when passed to `WithProgress(...)`. With auto-resolved counts the bar tracks the `MaxSamples` ceiling; pin `WithWarmup`/`WithIterations` for an exact total.
 
 ## File reporters
 
-All file reporters share the constructor shape `(string outputDirectory = ".", string? fileName = null, ReportDetail detail = ReportDetail.Simple)`:
+All file reporters share the constructor shape `(string outputDirectory = ".", string? name = null, ReportDetail detail = ReportDetail.Simple)`:
 
 ```csharp
 new JsonReporter("results/");
@@ -64,18 +65,18 @@ new CsvReporter("results/", detail: ReportDetail.Advanced);
 ```
 
 - `outputDirectory` **must be under the current working directory** (validated; a path outside CWD throws). It is created automatically.
-- When `fileName` is null, a timestamped name with a 3-digit counter is generated:
+- When `name` is null, a timestamped name with a 3-digit counter is generated:
   - Markdown / CSV: `benchmark-results-{yyyyMMdd-HHmmss}-{NNN}.{md|csv}`
   - JSON: `benchmarks-{yyyyMMdd-HHmmss}-{NNN}.json` (note the different prefix)
 
 ### Single-result extension methods
 
-On any `BenchmarkResult` (core package):
+On any `BenchmarkResult` (core package). Note these take a directory and an optional file name, not a single file path:
 
 ```csharp
-await result.ToMarkdownAsync("results/");   // (outputDir = ".", fileName = null)
-await result.ToJsonAsync("results/");
-await result.ToCsvAsync("results.csv");
+await result.ToMarkdownAsync("results/");              // (outputDir = ".", string? fileName = null)
+await result.ToJsonAsync("results/", "run.json");
+await result.ToCsvAsync("results/");
 ```
 
 ### JSON envelope
@@ -94,7 +95,7 @@ Each result also carries an `autoTune` object (resolved warmup/samples/ops, `war
 
 ## Detail levels
 
-`ReportDetail` is `{ Simple, Advanced }`. Simple is the default. Set it per reporter (`detail:` ctor arg), per suite (`.WithDetail(...)`), per host (`.WithDetail(...)`), or via `--detail simple|advanced`.
+`ReportDetail` is `{ Simple, Standard, Advanced }`. Simple is the default. Set it per reporter (`detail:` ctor arg), per suite (`.WithDetail(...)`), per host (`.WithDetail(...)`), or via `--detail simple|standard|advanced`.
 
 ### Simple — 10-column table
 
@@ -111,18 +112,22 @@ Each result also carries an `autoTune` object (resolved warmup/samples/ops, `war
 | Sig       | `✓` significant, `✗` not significant, `-` n/a |
 | Alloc/op  | Mean bytes/op, or `-` if not measured         |
 
+### Standard — same table + percentile columns and effect size
+
+Adds the configured percentile columns (default P50/P95/P99/P99.9/Max beyond the table), `EffectMetric`, `EffectValue`, `Magnitude` (Cliff's δ magnitude label), `MarginPercent`, `OutliersRemoved`.
+
 ### Advanced — same table + per-benchmark stats block
 
-Adds: outliers removed + method, range (Min–Max), quartiles (Q1/Q3/IQR), fences (IqrFence only), pre/post-trim sample counts + warmup, full CI bounds + margin %, CV %, skewness, kurtosis, MAD, N, (when measured) allocation median/P95/max, plus an `auto-tuned: …` line summarising the adaptive loop's decisions (resolved samples × ops, warmup length, achieved CI half-width).
+Adds: range (Min–Max), quartiles (Q1/Q3/IQR), fences (IqrFence only), pre/post-trim sample counts + warmup, full CI bounds + margin %, CV %, skewness, kurtosis, MAD, N, (when measured) allocation median/P95/max, plus an `auto-tuned: …` line summarising the adaptive loop's decisions (resolved samples × ops, warmup length, achieved CI half-width).
 
 ### Per-reporter behaviour
 
-| Reporter | Simple               | Advanced                                                   |
-| -------- | -------------------- | ---------------------------------------------------------- |
-| Console  | Table only           | Table + stats block + `auto-tuned:` line below each row    |
-| Markdown | Table only           | Table + details section (incl. `auto-tuned:` line)         |
-| CSV      | 22 columns           | 44 columns incl. quartiles, fences, shape + adaptive stats |
-| JSON     | Full record (always) | Full record (always)                                       |
+| Reporter | Simple               | Standard                                   | Advanced                                                   |
+| -------- | -------------------- | ------------------------------------------ | ---------------------------------------------------------- |
+| Console  | Table only           | Table + standard columns                   | Table + stats block + `auto-tuned:` line below each row    |
+| Markdown | Table only           | Table + standard columns                   | Table + details section (incl. `auto-tuned:` line)         |
+| CSV      | Base columns         | + percentiles, effect, CI, margin %       | + quartiles, fences, shape, adaptive stats, diagnostics    |
+| JSON     | Full record (always) | Full record (always)                       | Full record (always)                                       |
 
 ## Custom reporters
 
@@ -194,13 +199,21 @@ internal static class MyReporterRegistration
 
 Registry API:
 
-| Member      | Signature                                                                                   |
-| ----------- | ------------------------------------------------------------------------------------------- |
-| `Register`  | `Register(string name, string description, Func<string?, ReportDetail, IReporter> factory)` |
-| `TryCreate` | `TryCreate(string name, string? outputDir, ReportDetail detail, out IReporter? reporter)`   |
-| `Available` | `IReadOnlyList<ReporterInfo>` (`ReporterInfo(string Name, string Description)`)             |
+| Member              | Signature                                                                                   |
+| ------------------- | ------------------------------------------------------------------------------------------- |
+| `Register`          | `Register(string name, string description, Func<string?, ReportDetail, IReporter> factory)` |
+| `RegisterAutoAttach`| `RegisterAutoAttach(string name, string description, Func<string?, ReportDetail, IReporter> factory)` — reporter is auto-attached to every run even when `--reporter` is not specified |
+| `TryCreate`         | `TryCreate(string name, string? outputDir, ReportDetail detail, out IReporter? reporter)`   |
+| `Available`         | `IReadOnlyList<ReporterInfo>` — registered factories (`ReporterInfo(string Name, string Description)`) |
+| `AutoAttached`      | `IReadOnlyList<ReporterInfo>` — factories registered via `RegisterAutoAttach`                |
 
 `Register` throws `InvalidOperationException` if the name is already taken (case-insensitive). Packages that reference `NBenchmark.*` are auto-loaded so their `[ModuleInitializer]` registrations run; the console package self-registers `console` this way. Seed reporter descriptions: `"JSON file output (one file per run)"`, `"Markdown table output"`, `"CSV file output"`.
+
+## Observers (telemetry)
+
+For non-perturbing per-sample / per-phase telemetry (live trace events, histograms, latency feeds), implement `IMeasurementObserver` (namespace `NBenchmark`). The interface extends `IDisposable` and exposes `OnPhase`, `OnSample`, `OnDetector`, `OnResult` callbacks receiving readonly-struct event records (`MeasurementPhaseEvent`, `SampleEvent`, `DetectorStateEvent`). Built-in implementations: `NullMeasurementObserver` (no-op singleton), `ChannelMeasurementObserver` (bounded `Channel<MeasurementEvent>` with `DropOldest` backpressure), `CompositeMeasurementObserver` (fans out to a list of children with per-dispatch isolation).
+
+Attach with `.WithObserver(...)` (suite and host) or `BenchmarkHarness.WithObserver`. Register named factories with `ObserverRegistry` (namespace `NBenchmark.Observers` — same API shape as `ReporterRegistry`: `Register`, `RegisterAutoAttach`, `TryCreate`, `Available`, `AutoAttached`, `IsRegistered`). Composite observers can be built to stack multiple observers in one run.
 
 ## Related skills
 

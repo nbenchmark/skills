@@ -1,7 +1,7 @@
 ---
 name: nbenchmark-integration
-nbenchmarkVersion: v0.1.0
-lastVerified: 2026-06-12
+nbenchmarkVersion: v0.32.0
+lastVerified: 2026-07-21
 description: NBenchmark test-framework integration. Use when the user wants to enforce performance thresholds (max mean, max P95, max allocations, baseline regression) as part of an existing xUnit, NUnit, or MSTest test suite — via [PerformanceFact]/[PerformanceTheory], [Performance], [PerformanceTestMethod], or PerformanceAssert.Run. For dedicated benchmark projects with a CLI regression gate (--threshold-pct) see nbenchmark-host instead.
 ---
 
@@ -21,7 +21,7 @@ All three depend on `NBenchmark` (core) and pull in the shared `NBenchmark.Integ
 
 - Fail a unit test if code is slower than a budget
 - Enforce a max allocation budget in tests
-- Guard against regressions using a saved baseline file
+- Guard against regressions versus a reference method (or the built-in calibration baseline)
 - Measure just one part of a larger test (`PerformanceAssert.Run`)
 
 > For a standalone benchmark project gated by `--threshold-pct` in CI, use the `nbenchmark-host` skill. This skill is for assertions embedded in xUnit/NUnit/MSTest tests.
@@ -68,22 +68,23 @@ xUnit has **no** `PerformanceAssert`; for inline assertions in xUnit, run a benc
 
 ## Thresholds
 
-The attributes implement `IPerformanceThresholds` and expose **all ten** properties. A `-1` (for `double`/`long`) means "disabled"; omitting a property is the same as `-1`.
+The attributes implement `IPerformanceThresholds` and expose **eleven** properties. A `-1` (for `double`/`long`) or `0` (for `MaxSlowdownRatio` / `Iterations` / `WarmupIterations`) means "disabled / use default"; omitting a property is the same as the default.
 
-| Property             | Type          | Default               | Description                                               |
-| -------------------- | ------------- | --------------------- | --------------------------------------------------------- |
-| `MaxMeanNs`          | `double`      | `-1` (disabled)       | Max allowed mean (ns)                                     |
-| `MaxP95Ns`           | `double`      | `-1` (disabled)       | Max allowed P95 (ns)                                      |
-| `MaxAllocatedBytes`  | `long`        | `-1` (disabled)       | Max mean bytes/op; implicitly enables allocation tracking |
-| `BaselinePath`       | `string?`     | `null`                | JSON baseline file to compare against                     |
-| `MaxSlowdownRatio`   | `double`      | `1.2`                 | Max slowdown vs baseline (1.2 = +20%)                     |
-| `Iterations`         | `int`         | `0` (use default: auto) | Measured-sample override (`>0` pins)                    |
-| `WarmupIterations`   | `int`         | `0` (use default: auto) | Warmup override (`>0` pins)                             |
-| `MeasureAllocations` | `bool`        | `false`               | Enable allocation tracking                                |
-| `OutlierMode`        | `OutlierMode` | `IqrFence`            | Outlier strategy                                          |
-| `ConfidenceLevel`    | `double`      | `0.95`                | Confidence level for the Error column                     |
+| Property                        | Type          | Default               | Description                                               |
+| ------------------------------- | ------------- | --------------------- | --------------------------------------------------------- |
+| `MaxMeanNs`                     | `double`      | `-1` (disabled)       | Max allowed mean (ns)                                     |
+| `MaxP95Ns`                      | `double`      | `-1` (disabled)       | Max allowed P95 (ns)                                      |
+| `MaxAllocatedBytes`             | `long`        | `-1` (disabled)       | Max mean bytes/op; implicitly enables allocation tracking |
+| `ReferenceMethod`               | `string?`     | `null`                | Reference method name to compare against (attribute pattern only) |
+| `MaxSlowdownRatio`              | `double`      | `0` (disabled)        | Max slowdown vs reference (1.1 = +10%)                     |
+| `Iterations`                    | `int`         | `0` (use default: auto) | Measured-sample override (`>0` pins)                    |
+| `WarmupIterations`              | `int`         | `0` (use default: auto) | Warmup override (`>0` pins)                             |
+| `MeasureAllocations`            | `bool`        | `false`               | Enable allocation tracking                                |
+| `OutlierMode`                   | `OutlierMode` | `IqrFence`            | Outlier strategy                                          |
+| `ConfidenceLevel`               | `double`      | `0.95`                | Confidence level for the Error column                     |
+| `MaxAbsoluteThresholdTolerance` | `double`      | `1.0`                 | Multiplier relaxed on shared CI runners (1.0 = no slack)  |
 
-`PerformanceAssertionOptions` (NUnit / MSTest, used with the assert pattern) is an `init`-property class exposing the same ten properties.
+`PerformanceAssertionOptions` (NUnit / MSTest, used with the assert pattern) is an `init`-property class exposing the same eleven properties.
 
 ```csharp
 [PerformanceFact(
@@ -95,18 +96,20 @@ The attributes implement `IPerformanceThresholds` and expose **all ten** propert
 public void Serialize() => JsonSerializer.Serialize(_dto);
 ```
 
-## Baseline regression checks
+## Reference-method regression checks
 
-Save a known-good run to JSON, then point `BaselinePath` at it. The test fails if the baseline file is missing, the benchmark name isn't in the file, or `measured.median > baseline.median × MaxSlowdownRatio`.
+`ReferenceMethod` names another method on the same test class to use as the reference baseline. The test fails if `measured.median > reference.median × MaxSlowdownRatio` (and the difference is statistically significant). The reference method must either accept the same arguments as the benchmark method or be parameterless. If `ReferenceMethod` is null and `MaxSlowdownRatio` is set, the framework uses the built-in `PerformanceCalibration` baseline (a cached one-off calibration run) instead.
 
 ```csharp
-// 1. Capture a baseline once (e.g. a one-off run committed to the repo)
-await Benchmark.Run(() => Parse(Payload), name: "ParseJson").ToJsonAsync("baselines/");
+// Attribute pattern: reference another method on the same class
+[PerformanceFact(MaxSlowdownRatio = 1.10, ReferenceMethod = nameof(Baseline))]
+public void NewImpl() => NewParser.Parse(Payload);
 
-// 2. Guard against regressions in CI
-[PerformanceFact(BaselinePath = "baselines/parse-json.json", MaxSlowdownRatio = 1.1)] // fail if >10% slower
-public void ParseJson() => Parse(Payload);
+[PerformanceFact]
+public void Baseline() => OldParser.Parse(Payload);
 ```
+
+> The assert pattern (NUnit / MSTest `PerformanceAssert`) does **not** support `ReferenceMethod` — passing a non-null value produces a hard violation. Use the attribute pattern for reference-method comparisons, or leave `ReferenceMethod` null to use the calibration baseline.
 
 ## `NBenchmark.Integration.Abstractions`
 
@@ -114,11 +117,14 @@ Namespace `NBenchmark.Integration.Abstractions` — the shared building blocks u
 
 | Member                            | Signature                                                                                                                                            | Purpose                                                      |
 | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| `IPerformanceThresholds`          | interface, 10 props above                                                                                                                            | Common threshold contract                                    |
-| `PerformanceThresholds`           | sealed `init` class — `MaxMeanNs?`, `MaxP95Ns?`, `MaxAllocatedBytes?`, `BaselinePath?`, `MaxSlowdownRatio=1.2`, `Iterations=0`, `WarmupIterations=0` | Nullable threshold bag for `BenchmarkAssert`                 |
+| `IPerformanceThresholds`          | interface, 11 props above                                                                                                                            | Common threshold contract                                    |
+| `PerformanceThresholds`           | sealed `init` class — `MaxMeanNs?`, `MaxP95Ns?`, `MaxAllocatedBytes?` (all `null`), `MaxSlowdownRatio=0`, `Iterations=0`, `WarmupIterations=0`, `MaxAbsoluteThresholdTolerance=1.0` | Nullable threshold bag for `BenchmarkAssert.Validate` (only the absolute thresholds; does not implement `IPerformanceThresholds`) |
 | `BenchmarkAssert.Validate`        | `(BenchmarkResult, PerformanceThresholds) → IReadOnlyList<string>`                                                                                   | Returns violation messages (checks mean / P95 / allocations) |
+| `BenchmarkAssert.SetHostAssessment` / `ResetHostAssessment` | `(HostAssessment) → void` / `() → void`                                                                                                 | Override the shared-runner detection used to relax absolute thresholds |
 | `MeasurementOptionsBuilder.Build` | `(IPerformanceThresholds) → MeasurementOptions`                                                                                                      | Translate thresholds into measurement options                |
-| `RegressionBaseline.Check`        | `(BenchmarkResult, string baselinePath, double maxSlowdownRatio) → IReadOnlyList<string>`                                                            | Baseline-file comparison                                     |
+| `RelativeComparison.Check`        | `(BenchmarkResult candidate, double[] candidateSamples, BenchmarkResult reference, double[] referenceSamples, double maxSlowdownRatio, double significanceLevel = 0.05) → IReadOnlyList<string>` | Pairwise regression check (Mann-Whitney U + ratio gate) |
+| `RelativeComparison.CheckStructured` | Same args → `RelativeComparisonVerdict` (violations + ratio, p-value, Cliff's δ, IsRegression)                                                   | Structured form of `Check`                                   |
+| `PerformanceCalibration.Run` / `CreateBenchmarkResult` | `() → CalibrationResult` (cached) / `() → BenchmarkResult`                                                                                  | Built-in fallback baseline when `ReferenceMethod` is null and `MaxSlowdownRatio` is set |
 | `MetricsFormatter.Format`         | `(BenchmarkResult) → string`                                                                                                                         | Human-readable metrics block                                 |
 
 Inline assertion in **xUnit** (no `PerformanceAssert` there):
@@ -145,20 +151,24 @@ public void Query_Is_Fast()
 - `[PerformanceFact]` (`: FactAttribute`) and `[PerformanceTheory]` (`: TheoryAttribute`), both implement `IPerformanceThresholds`.
 - `PerformanceAssertException : Exception` is thrown on violations (surfaced by the discoverers as a failed test).
 - No `PerformanceAssert` class — use `BenchmarkAssert.Validate` for inline checks.
+- Supported method return types: `void`, `Task`, `ValueTask`, `Task<T>`, `ValueTask<T>`, or any sync `T` (wrapped so the JIT can't elide the return value).
 
 ### NUnit (`NBenchmark.Integration.NUnit`)
 
-- `[Performance]` (`: NUnitAttribute`) implements `IPerformanceThresholds`.
-- `PerformanceAssert` static methods: `Run(Action, PerformanceAssertionOptions? = null, string name = "Benchmark", CancellationToken = default)`, `Run<T>(Func<T> …)`, `RunAsync(Func<Task> …)`, `RunAsync<T>(Func<Task<T>> …)`, and `Validate(BenchmarkResult, PerformanceAssertionOptions? = null)`. `Run*` return the `BenchmarkResult`.
+- `[Performance]` (`: NUnitAttribute`, targets `Method`) implements `IPerformanceThresholds`. Implements NUnit's `ISimpleTestBuilder`, `IWrapTestMethod`, `IApplyToTest`.
+- `PerformanceAssert` static methods: `Run(Action, PerformanceAssertionOptions? = null, string name = "Benchmark", CancellationToken = default)`, `Run<T>(Func<T> …)`, `RunAsync(Func<Task> …)`, `RunAsync<T>(Func<Task<T>> …)`, `Validate(BenchmarkResult, PerformanceAssertionOptions? = null)`, and `Validate(BenchmarkResult, double[] rawSamples, PerformanceAssertionOptions? = null)`. `Run*` return the `BenchmarkResult`.
+- `PerformanceAssertionOptions` (init-only class) exposes the same eleven threshold properties.
 - Violations fail via `Assert.Fail` (no public custom exception type).
+- `ReferenceMethod` is **rejected** in the assert pattern — passing a non-null value produces a hard violation message.
 
 ### MSTest (`NBenchmark.Integration.MSTest`)
 
-- `[PerformanceTestMethod]` (`: TestMethodAttribute`) implements `IPerformanceThresholds`.
+- `[PerformanceTestMethod]` (`: TestMethodAttribute`, targets `Method`) implements `IPerformanceThresholds`. Overrides `ExecuteAsync` to run the benchmark and return a one-element `TestResult[]` (`Passed` / `Failed`).
 - `PerformanceAssert` and `PerformanceAssertionOptions` are identical in shape to NUnit's.
-- `PerformanceAssertException : AssertFailedException` (`[Serializable]`).
+- `PerformanceAssertException : AssertFailedException` (`[Serializable]`) — extends MSTest's `AssertFailedException` so the runner treats it as a test failure.
+- Same `ReferenceMethod` rejection as NUnit in the assert pattern.
 
-All integration packages target net8.0/net9.0/net10.0. There is no `[IsolatedProcess]` or detail-level concept in the integration layer — those are Host/reporter features.
+All integration packages target net8.0/net9.0/net10.0. There is no `[IsolatedProcess]` or detail-level concept in the integration layer — those are Harness/reporter features.
 
 ## Related skills
 

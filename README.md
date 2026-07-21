@@ -6,11 +6,11 @@ AI agent skills for [NBenchmark](https://github.com/nbenchmark/nbenchmark), a li
 
 | Skill | Description |
 |---|---|
-| **nbenchmark** | Core benchmarking with Quick mode (`Benchmark.Run` / `RunAsync`) and Suite mode (`BenchmarkSuite` fluent builder) |
-| **nbenchmark-host** | Host mode for dedicated benchmark projects - attribute-based discovery, CLI flags, `[IsolatedProcess]`, dependency injection, and CI/CD regression detection |
+| **nbenchmark** | Core benchmarking with Single mode (`Benchmark.Run` / `RunAsync`) and Suite mode (`BenchmarkSuite` fluent builder) |
+| **nbenchmark-host** | Harness mode for dedicated benchmark projects - attribute-based discovery, CLI flags, `[IsolatedProcess]`, dependency injection, and CI/CD regression detection |
 | **nbenchmark-reporters** | Reporter pipeline for console, JSON, Markdown, and CSV output, report detail levels, plus custom reporter creation |
 | **nbenchmark-integration** | Enforce performance thresholds as xUnit, NUnit, or MSTest tests - attributes, `PerformanceAssert`, and baseline regression checks |
-| **nbenchmark-troubleshooting** | Diagnosing analyzer diagnostics (NB0001-NB0010), incorrect results, discovery issues, and tuning measurement parameters |
+| **nbenchmark-troubleshooting** | Diagnosing analyzer diagnostics (NB0001-NB0013), incorrect results, discovery issues, and tuning measurement parameters |
 
 ## Installation
 

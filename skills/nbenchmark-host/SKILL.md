@@ -1,23 +1,25 @@
 ---
 name: nbenchmark-host
-nbenchmarkVersion: v0.1.0
-lastVerified: 2026-06-12
-description: NBenchmark Host mode for dedicated benchmark projects. Use when the user wants attribute-based benchmark discovery ([Benchmark], [BenchmarkArguments], lifecycle attributes, [IsolatedProcess]), a command-line interface (BenchmarkHost.Create(args)), constructor dependency injection for benchmark classes, or CI/CD regression gates. For one-off measurements and suites see the core nbenchmark skill; for output formats see nbenchmark-reporters.
+nbenchmarkVersion: v0.32.0
+lastVerified: 2026-07-21
+description: NBenchmark Harness mode for dedicated benchmark projects. Use when the user wants attribute-based benchmark discovery ([Benchmark], [BenchmarkCase]/[BenchmarkCases], lifecycle attributes, [IsolatedProcess]), a command-line interface (BenchmarkHarness.Create(args)), constructor dependency injection for benchmark classes, or CI/CD regression gates. For one-off measurements and suites see the core nbenchmark skill; for output formats see nbenchmark-reporters.
 ---
 
-# NBenchmark Host Mode
+# NBenchmark Harness Mode
 
-`BenchmarkHost` is for **dedicated benchmark projects** — a separate console app that scans assemblies for `[Benchmark]`-decorated methods and exposes a full CLI, so you can filter and configure runs from the terminal without recompiling.
+`BenchmarkHarness` is for **dedicated benchmark projects** — a separate console app that scans assemblies for `[Benchmark]`-decorated methods and exposes a full CLI, so you can filter and configure runs from the terminal without recompiling.
 
-Install: `dotnet add package NBenchmark` (+ `NBenchmark.Reporters.Console` for terminal output).
+> The CLI entry point is the `NBenchmark.Tool` package (`dotnet benchmark` global tool). It forwards unknown flags to `BenchmarkHarness.Create(args)`. Most users wire up the harness directly in their own console `Program.cs`, as shown below — `BenchmarkHarness.Create(args)` is the public API.
+
+Install: `dotnet add package NBenchmark` (+ `NBenchmark.Reporters.Console` for terminal output). For the standalone global tool instead of a custom Program.cs: `dotnet tool install -g NBenchmark.Tool` (command name `benchmark`).
 
 ## When to use this skill
 
 - Set up a dedicated benchmark console project
 - Discover benchmarks via `[Benchmark]` attributes
-- Parameterize benchmarks with `[BenchmarkArguments]`
+- Parameterize benchmarks with `[BenchmarkCase]` / `[BenchmarkCases]`
 - Use setup/teardown lifecycle hooks
-- Isolate a benchmark in its own process (`[IsolatedProcess]`)
+- Isolate a benchmark in its own process (`[IsolatedProcess]`) or force in-process (`[InProcess]`)
 - Drive runs from the command line
 - Inject dependencies into benchmark classes
 - Gate CI on performance regressions
@@ -38,7 +40,7 @@ using NBenchmark;
 using NBenchmark.Reporters.Console;
 using NBenchmark.Attributes;
 
-await BenchmarkHost.Create(args)
+await BenchmarkHarness.Create(args)
     .AddFromAssembly<StringBenchmarks>()
     .WithReporter(new ConsoleReporter())
     .WithProgress(new ConsoleBenchmarkProgress())
@@ -89,19 +91,36 @@ public string CurrentImpl() => Production.DoWork();
 public string HotPath() => Candidate.DoWork();
 ```
 
-### `[BenchmarkArguments(params object[])]`
+### `[BenchmarkCase(params object[])]` and `[BenchmarkCases(string sourceName)]`
 
-Runs the method once per argument set (`AllowMultiple = true`). The method must accept matching parameters. Each set becomes a separate entry named `MethodName(arg1, arg2, ...)`. Argument count/type mismatches are caught by analyzer NB0003.
+Two complementary attributes for parameterised benchmarks (`AllowMultiple = true` on `[BenchmarkCase]`). The method must accept matching parameters; each case becomes a separate row named `MethodName(arg1, arg2, ...)`. Argument count/type mismatches are caught by analyzer NB0003; combining both attributes on one method is NB0012.
+
+`[BenchmarkCase(...)]` is for a short inline list of literal arguments:
 
 ```csharp
-[BenchmarkArguments(10)]
-[BenchmarkArguments(1_000)]
-[BenchmarkArguments(100_000)]
-[Benchmark]
+[Benchmark(Baseline = true)]
+[BenchmarkCase(10)]
+[BenchmarkCase(1_000)]
+[BenchmarkCase(100_000)]
 public void Sort(int n)
 {
     var arr = Enumerable.Range(0, n).Reverse().ToArray();
     Array.Sort(arr);
+}
+```
+
+`[BenchmarkCases(nameof(Source))]` is for programmatic, named, or generated cases. The source method must be parameterless (static or instance), return `IEnumerable<ValueTuple<...>>`, and have an arity matching the benchmark method's parameters (max 7). Tuple element names become columns in the report:
+
+```csharp
+[Benchmark(Baseline = true)]
+[BenchmarkCases(nameof(BinarySearchCases))]
+public int BinarySearch(int count, string targetLabel) { /* ... */ }
+
+public static IEnumerable<(int Count, string Target)> BinarySearchCases()
+{
+    yield return (100, "first");
+    yield return (10000, "middle");
+    yield return (100000, "last");
 }
 ```
 
@@ -130,9 +149,9 @@ public class DatabaseBenchmarks
 }
 ```
 
-### `[IsolatedProcess]`
+### `[IsolatedProcess]` / `[InProcess]`
 
-Runs a benchmark in a freshly spawned child process instead of in-process. Apply to a method, or to a class to isolate every benchmark it declares (`AttributeUsage = Method | Class`, `Inherited = true`).
+`[IsolatedProcess]` runs a benchmark in a freshly spawned child process instead of in-process. `[InProcess]` forces in-process execution even when the harness-wide default is isolated. Apply to a method, or to a class to affect every benchmark it declares (`AttributeUsage = Method | Class`, `Inherited = true`).
 
 ```csharp
 public class StartupBenchmarks
@@ -145,34 +164,78 @@ public class StartupBenchmarks
 
 Each isolated benchmark runs in a clean CLR, so it isn't influenced by JIT, GC, or thread-pool state warmed up by sibling benchmarks. The host re-runs the entry assembly for the child, executes only that one benchmark, and reads the result back through a temporary file (never stdout, so the child's console output can't corrupt the data). It uses internal `--nb-isolated-run` / `--nb-isolated-output` flags you never pass yourself. Isolation trades a process launch per benchmark for measurement cleanliness; use it only when a benchmark is sensitive to runtime warmup state. In-process and isolated benchmarks coexist in one suite and run separately.
 
+### `[InstanceLifetime]`
+
+Controls whether the harness reuses one instance across all `[Benchmark]` methods in a class (`PerClass`, the default) or creates a fresh instance per method (`PerMethod`). Apply to a class only.
+
+```csharp
+[InstanceLifetime(InstanceLifetime.PerMethod)]
+public class StatelessBenchmarks { /* ... */ }
+```
+
+With `PerClass` and multiple `[Benchmark]` methods sharing mutable state, the analyzers NB0011 (scoped service injection) and NB0013 (mutable instance field) warn about possible state contamination. Implement `NBenchmark.Lifecycle.IStateReset` (a `ResetAsync(CancellationToken)` method) to opt out of NB0011 by making the contamination explicit and resettable.
+
+### `[Runtimes]`
+
+Declares target runtimes for cross-runtime comparison (`RuntimeMoniker.Net8` / `Net9` / `Net10`). The harness builds and runs each runtime in its own child process. Apply to a class only.
+
+```csharp
+[Runtimes(RuntimeMoniker.Net8, RuntimeMoniker.Net10)]
+public class CrossRuntimeBenchmarks { /* ... */ }
+```
+
+### `[BenchmarkCategory]`
+
+Tags a benchmark method or class with a category (`AllowMultiple = true`, `Method | Class`). Use with `--filter`/`--category-include`/`--category-exclude` or `WithCategoryFilter` to scope runs.
+
+```csharp
+[BenchmarkCategory("cold")]
+[Benchmark]
+public int ColdPath() => RunColdSensitiveWork();
+```
+
 ## Class requirements
 
 Classes are instantiated via `Activator.CreateInstance`, so they need a **public parameterless constructor** (NB0001 warns if missing). For constructor dependencies, use the DI companion package below.
 
 ## Fluent host configuration
 
-`BenchmarkHost.Create(args)` returns a builder:
+`BenchmarkHarness.Create(args)` returns a builder:
 
 | Method                                               | Purpose                                                                    |
 | ---------------------------------------------------- | -------------------------------------------------------------------------- |
 | `AddFromAssembly<T>()` / `AddFromAssembly(Assembly)` | Scan an assembly for `[Benchmark]` methods (call once per assembly)        |
 | `WithReporter(reporter)`                             | Add an `IReporter` (stackable)                                             |
 | `WithOptions(MeasurementOptions)`                    | Default measurement options (CLI flags override)                           |
+| `WithLaunchCount(n)`                                 | Repeat the suite as `n` separate launches (default 1)                       |
 | `WithRunOrder(order)`                                | `RunOrder.Random` (default) or `RunOrder.Declaration`                      |
-| `WithDetail(detail)`                                 | `ReportDetail.Simple` (default) or `.Advanced`                             |
+| `WithDetail(detail)`                                 | `ReportDetail.Simple` (default) / `Standard` / `Advanced`                  |
 | `WithProgress(progress)`                             | Live progress callback (`ConsoleBenchmarkProgress` in the console package) |
-| `WithInstanceFactory(factory)`                       | Custom factory for benchmark class instances (DI hook)                     |
+| `WithObserver(observer)`                             | Non-perturbing `IMeasurementObserver` telemetry                            |
+| `WithInstanceFactory(factory)`                        | Custom factory for benchmark class instances (DI hook)                     |
+| `WithServiceProvider(sp)`                             | Resolve benchmark instances from an `IServiceProvider` (DI package)         |
+| `WithMinimumPracticalEffect(delta)`                  | Downgrade Sig to NotSignificant below this Cliff's δ effect size            |
+| `WithHardwareAffinity(params int[] cores)`           | Pin CPU cores for the run                                                  |
+| `WithProcessPriority(priority)`                       | Set process priority                                                        |
+| `WithDedicatedHostGuidance(bool = true)`             | Warn if running on a shared CI host                                          |
+| `WithMeasurementProfile(profile)`                    | `Realistic` (default) or `Independent` GC behaviour                         |
+| `WithAutoTune(options)` / `WithAutoTune(preset)`     | Bound/steer the adaptive loop                                               |
+| `WithOpsPerSample(n)`                                | Pin K — body invocations per timed sample                                   |
+| `WithDiagnostics(options)` / `WithDiagnostics(mode)` | GC/heap/exception/CPU-time diagnostics                                       |
+| `WithIsolation(bool = true)`                         | Run all benchmarks in dedicated child processes                             |
+| `WithCrossClassSignificance(bool = true)`            | Run significance tests across classes (default false - within-class only)   |
+| `WithInstanceLifetime(lifetime)`                     | `PerClass` (default) or `PerMethod` instance reuse                          |
+| `WithCategoryFilter(include?, exclude?)`             | Run only benchmarks matching the category filter                            |
 | `RunAsync()`                                         | Parse args, discover, run; returns `IReadOnlyList<BenchmarkResult>`        |
 
 ```csharp
-await BenchmarkHost.Create(args)
+await BenchmarkHarness.Create(args)
     .AddFromAssembly<StringBenchmarks>()
     .AddFromAssembly<DatabaseBenchmarks>()
     .WithOptions(new MeasurementOptions
     {
         Iterations = 500,
         WarmupIterations = 50,
-        MeasureAllocations = true,
         ConfidenceLevel = 0.99,
     })
     .WithDetail(ReportDetail.Advanced)
@@ -180,20 +243,23 @@ await BenchmarkHost.Create(args)
     .RunAsync();
 ```
 
-Significance is configured through `WithOptions` (`EnableSignificance`, `SignificanceLevel`) or the `--alpha` CLI flag — there is no `WithSignificance` directly on the host. CLI flags always override `WithOptions` values.
+Significance is configured through `WithOptions` (`EnableSignificance`, `SignificanceLevel`, `MinimumPracticalEffect`) or the `--alpha` CLI flag — there is no `WithSignificance` directly on the host. CLI flags always override `WithOptions` values.
 
 ## Command-line interface
 
-`BenchmarkHost.Create(args)` parses arguments automatically — no parsing library needed.
+`BenchmarkHarness.Create(args)` parses arguments automatically — no parsing library needed.
 
 ```bash
 dotnet run -- --filter Sort* --iterations 1000 --reporter markdown --output ./results
 dotnet run -- --list        # discover without running
 dotnet run -- --dry-run     # wire up everything, never invoke the body
 dotnet run -- --detail advanced
+dotnet run -- --in-process  # force all benchmarks in-process (overrides [IsolatedProcess])
 ```
 
-Frequently used flags: `--filter`, `--iterations`, `--warmup`, `--auto-tune`, `--ops-per-sample`, `--ci-target`, `--min-samples`, `--max-samples`, `--confidence`, `--alpha`, `--reporter`, `--output`, `--order`, `--seed`, `--detail`, `--list`, `--dry-run`, `--threshold-pct`, `--help`/`-h`.
+Frequently used flags: `--filter`, `--iterations`, `--warmup`, `--auto-tune`, `--ops-per-sample`, `--ci-target`, `--min-samples`, `--max-samples`, `--min-warmup`, `--max-warmup`, `--max-tuning-time`, `--confidence`, `--alpha`, `--reporter`, `--output`, `--order`, `--seed`, `--detail`, `--list`, `--dry-run`, `--in-process`, `--profile`, `--force-gc`, `--no-allocations`, `--threshold-pct`, `--help`/`-h`.
+
+If you use the standalone `NBenchmark.Tool` global tool (`dotnet benchmark`), it also accepts `--project <path>` (builds a .csproj with `dotnet build -c Release` and benchmarks the resulting DLL) and `--assembly <path>` (benchmarks a pre-built DLL). With neither, it auto-discovers `*.dll` in the current directory. All other flags are forwarded to `BenchmarkHarness.Create`.
 
 See [references/cli.md](references/cli.md) for every flag, exit codes, and CI examples.
 
@@ -210,7 +276,7 @@ var services = new ServiceCollection()
     .AddTransient<OrderBenchmarks>()
     .BuildServiceProvider();
 
-await BenchmarkHost.Create(args)
+await BenchmarkHarness.Create(args)
     .UseDependencyInjection<OrderBenchmarks>(services)   // = AddFromAssembly<T>().WithServiceProvider(sp)
     .RunAsync();
 
@@ -225,8 +291,8 @@ DI extension methods:
 
 | Method                                | Behaviour                                                                                       |
 | ------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `WithServiceProvider(sp)`             | Resolve benchmark instances from `sp`                                                           |
-| `WithScopedServiceProvider(sp)`       | Create a DI scope for the run; disposed during post-suite cleanup (`DbContext`-style lifetimes) |
+| `WithServiceProvider(sp)`             | Resolve benchmark instances from `sp` (root lifetime - instances not disposed by the harness)   |
+| `WithScopedServiceProvider(sp)`       | Create a DI scope per benchmark-class instance; disposed after `[BenchmarkTeardown]`           |
 | `UseDependencyInjection<T>(sp)`       | `AddFromAssembly<T>()` + `WithServiceProvider(sp)`                                              |
 | `UseScopedDependencyInjection<T>(sp)` | `AddFromAssembly<T>()` + `WithScopedServiceProvider(sp)`                                        |
 
@@ -248,7 +314,7 @@ For richer assertions (allocation budgets, P95 limits, baseline files) inside yo
 
 ## Related skills
 
-- **nbenchmark** — Quick and Suite modes, `MeasurementOptions`, `BenchmarkResult`
+- **nbenchmark** — Single and Suite modes, `MeasurementOptions`, `BenchmarkResult`
 - **nbenchmark-reporters** — reporter pipeline, detail levels, custom reporters
 - **nbenchmark-integration** — performance thresholds as xUnit/NUnit/MSTest tests
 - **nbenchmark-troubleshooting** — analyzer diagnostics, wrong results, tuning
