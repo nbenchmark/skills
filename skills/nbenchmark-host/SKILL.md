@@ -312,9 +312,26 @@ dotnet run -c Release -- --threshold-pct 10 --reporter json --output ./results
 
 For richer assertions (allocation budgets, P95 limits, baseline files) inside your existing test suite, see the `nbenchmark-integration` skill.
 
+## Telemetry (OpenTelemetry / OTLP)
+
+NBenchmark emits a full set of OpenTelemetry metrics and traces through a `Meter` / `ActivitySource` (name `"NBenchmark"`). Pass `--otlp-endpoint <url>` to export them to a collector; the endpoint is forwarded to isolated children so they stream to the same place as the parent.
+
+```bash
+dotnet run -c Release -- --otlp-endpoint http://localhost:4317
+```
+
+Instruments include per-sample histograms (`nbenchmark.sample.duration`, `nbenchmark.alloc.bytes_per_op`), GC and outlier counters, live gauges (CI half-width, jitter metric, ops/s), and a three-level trace (`benchmark.suite` -> `benchmark.run` -> `nbenchmark.phase.{phase}`) with span events for detector switches, warmup plateau, CI target met, and cap hits. Resource attributes (commit SHA, branch, CI provider, host) are stamped on the root span from environment variables.
+
+See [references/telemetry.md](references/telemetry.md) for every instrument name, tag, span, span event, and resource attribute.
+
+## References
+
+- [cli.md](references/cli.md) - every CLI flag, exit codes, CI examples
+- [telemetry.md](references/telemetry.md) - OpenTelemetry instruments, spans, resource attributes
+
 ## Related skills
 
 - **nbenchmark** — Single and Suite modes, `MeasurementOptions`, `BenchmarkResult`
-- **nbenchmark-reporters** — reporter pipeline, detail levels, custom reporters
+- **nbenchmark-reporters** — reporter pipeline, detail levels, custom reporters, observers
 - **nbenchmark-integration** — performance thresholds as xUnit/NUnit/MSTest tests
 - **nbenchmark-troubleshooting** — analyzer diagnostics, wrong results, tuning
