@@ -213,11 +213,17 @@ Registry API:
 
 For non-perturbing per-sample / per-phase telemetry (live trace events, histograms, latency feeds), implement `IMeasurementObserver` (namespace `NBenchmark`). The interface extends `IDisposable` and exposes `OnPhase`, `OnSample`, `OnDetector`, `OnResult` callbacks receiving readonly-struct event records (`MeasurementPhaseEvent`, `SampleEvent`, `DetectorStateEvent`). Built-in implementations: `NullMeasurementObserver` (no-op singleton), `ChannelMeasurementObserver` (bounded `Channel<MeasurementEvent>` with `DropOldest` backpressure), `CompositeMeasurementObserver` (fans out to a list of children with per-dispatch isolation).
 
-Attach with `.WithObserver(...)` (suite and host) or `BenchmarkHarness.WithObserver`. Register named factories with `ObserverRegistry` (namespace `NBenchmark.Observers` — same API shape as `ReporterRegistry`: `Register`, `RegisterAutoAttach`, `TryCreate`, `Available`, `AutoAttached`, `IsRegistered`). Composite observers can be built to stack multiple observers in one run.
+Attach with `.WithObserver(...)` (suite and host) or `BenchmarkHarness.WithObserver`. Register named factories with `ObserverRegistry` (namespace `NBenchmark.Observers` - same API shape as `ReporterRegistry`: `Register`, `RegisterAutoAttach`, `TryCreate`, `Available`, `AutoAttached`, `IsRegistered`). Composite observers can be built to stack multiple observers in one run.
+
+See [references/observers.md](references/observers.md) for the full observer/progress API: the `IMeasurementObserver` contract, the `MeasurementEvent` tagged union and event records, the `MeasurementPhase` / `PhaseTransition` / `WarmupStopReason` / `SampleStopReason` enums, the built-in observers, `ObserverRegistry`, and the `IBenchmarkProgress` progress interface (distinct from observers).
+
+## References
+
+- [observers.md](references/observers.md) - `IMeasurementObserver`, event types, `ObserverRegistry`, `IBenchmarkProgress`
 
 ## Related skills
 
 - **nbenchmark** — running benchmarks, `BenchmarkResult` fields
-- **nbenchmark-host** — `--reporter`, `--output`, `--detail` CLI flags
+- **nbenchmark-host** — `--reporter`, `--output`, `--detail`, `--observer` CLI flags
 - **nbenchmark-integration** — assertion-style reporting inside test frameworks
 - **nbenchmark-troubleshooting** — output/path issues, interpreting warnings

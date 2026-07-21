@@ -273,6 +273,12 @@ if (result.Errored)
     Console.WriteLine($"Failed: {result.ErrorMessage}");
 ```
 
+## References
+
+- [benchmark-result.md](references/benchmark-result.md) - every `BenchmarkResult` field
+- [measurement-options.md](references/measurement-options.md) - every `MeasurementOptions` property, outlier modes, tuning
+- [significance-and-outliers.md](references/significance-and-outliers.md) - pluggable significance tests, outlier detectors, effect size, warnings
+
 ## Related skills
 
 - **nbenchmark-host** — attribute-based discovery, CLI, dependency injection, `[IsolatedProcess]`, CI regression gates
