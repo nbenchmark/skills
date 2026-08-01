@@ -300,9 +300,22 @@ Both console progress implementations print a one-line summary per benchmark on 
 
 Observers and progress are invoked from the same emit points in `AdaptiveLoop`, so both fire on every phase transition, sample, and benchmark completion. The observer carries the measurement payload; the progress carries the lifecycle signal. Attach both when you want both a live UI and a telemetry stream.
 
-## Isolated-process note
+## Isolated-worker delivery
 
-Programmatic observers attached via `.WithObserver(instance)` do NOT cross the process boundary - an isolated child runs with `NullMeasurementObserver` only. Named observers resolved through `ObserverRegistry` (via `--observer <name>` or auto-attach) DO cross: the harness re-registers them in the child process. If you need telemetry from an isolated benchmark, register your observer through `ObserverRegistry` and attach by name rather than passing an instance directly.
+An isolated worker is a separate process, so observer callbacks must cross a process boundary to reach the coordinator. The four callbacks have different volumes, so they cross differently:
+
+| Callback | Crosses the boundary? | How |
+|---|---|---|
+| `OnPhase` | Yes, unconditionally | Phase transitions happen a handful of times per benchmark - low volume, useful for live convergence monitoring. |
+| `OnDetector` | Yes, unconditionally | Detector snapshots are low-volume. |
+| `OnResult` | Yes, unconditionally | One per benchmark; the full summary. |
+| `OnSample` | Only when `--stream-samples` is set | A nanosecond body emits thousands of sample events, and encoding them puts the cost of observing the run inside the run. Off by default. Forwarded in batches of 128 samples or 100 ms, whichever comes first. |
+
+The `--stream-samples` stream is withdrawn automatically when no observer is attached. Second and later replicates of a multi-launch run do not forward telemetry. `MeasurementOptions.StreamSamples` is the programmatic equivalent; `MeasurementOptions.MaxRawSamples` bounds the complete-sample array that arrives with the result (distinct from the live stream - both can be on, neither implies the other).
+
+Programmatic observers attached via `.WithObserver(instance)` do NOT cross the boundary - the instance is a live object in the coordinator. Named observers resolved through `ObserverRegistry` (via `--observer <name>` or auto-attach) DO cross: the harness re-registers them in the worker. If you need telemetry from an isolated benchmark, register your observer through `ObserverRegistry` and attach by name rather than passing an instance directly.
+
+See [isolation.md](../../nbenchmark/references/isolation.md) for the worker model and [measurement-options.md](../../nbenchmark/references/measurement-options.md#streamsamples) for the `StreamSamples` option.
 
 ## Related references
 

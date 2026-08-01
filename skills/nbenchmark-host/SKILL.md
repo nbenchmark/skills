@@ -1,8 +1,8 @@
 ---
 name: nbenchmark-host
-nbenchmarkVersion: v0.32.0
-lastVerified: 2026-07-21
-description: NBenchmark Harness mode for dedicated benchmark projects. Use when the user wants attribute-based benchmark discovery ([Benchmark], [BenchmarkCase]/[BenchmarkCases], lifecycle attributes, [IsolatedProcess]), a command-line interface (BenchmarkHarness.Create(args)), constructor dependency injection for benchmark classes, or CI/CD regression gates. For one-off measurements and suites see the core nbenchmark skill; for output formats see nbenchmark-reporters.
+nbenchmarkVersion: v0.37.0
+lastVerified: 2026-08-01
+description: NBenchmark Harness mode for dedicated benchmark projects. Use when the user wants attribute-based benchmark discovery ([Benchmark], [BenchmarkCase]/[BenchmarkCases], lifecycle attributes, [IsolatedProcess]/[InProcess]), a command-line interface (BenchmarkHarness.Create(args)), constructor dependency injection for benchmark classes, or CI/CD regression gates. Every benchmark class runs in a dedicated worker process by default. For one-off measurements and suites see the core nbenchmark skill; for output formats see nbenchmark-reporters.
 ---
 
 # NBenchmark Harness Mode
@@ -19,7 +19,7 @@ Install: `dotnet add package NBenchmark` (+ `NBenchmark.Reporters.Console` for t
 - Discover benchmarks via `[Benchmark]` attributes
 - Parameterize benchmarks with `[BenchmarkCase]` / `[BenchmarkCases]`
 - Use setup/teardown lifecycle hooks
-- Isolate a benchmark in its own process (`[IsolatedProcess]`) or force in-process (`[InProcess]`)
+- Isolate a benchmark in its own worker (`[IsolatedProcess]`) or opt out of the default (`[InProcess]`, `--in-process`)
 - Drive runs from the command line
 - Inject dependencies into benchmark classes
 - Gate CI on performance regressions
@@ -78,8 +78,9 @@ Marks a **public instance** method (sync, `Task`, or `Task<T>`). Return a value 
 | `Baseline`         | `bool`    | `false`      | Marks the baseline for ratio/significance |
 | `Iterations`       | `int`     | `-1` (unset) | Per-method iteration override (0–100,000) |
 | `WarmupIterations` | `int`     | `-1` (unset) | Per-method warmup override (0–10,000)     |
+| `LaunchCount`      | `int`     | `-1` (unset) | Per-method launch-count override (1–100)  |
 
-`Iterations`/`WarmupIterations` use `-1` as the "unset" sentinel (named attribute arguments can't be nullable value types). Set a value ≥ 0 to override the host options for that method only. Helpers `HasIterationsOverride` / `HasWarmupIterationsOverride` report whether an override is present.
+`Iterations`/`WarmupIterations`/`LaunchCount` use `-1` as the "unset" sentinel (named attribute arguments can't be nullable value types). Set a value ≥ 0 to override the host options for that method only. Helpers `HasIterationsOverride` / `HasWarmupIterationsOverride` / `HasLaunchCountOverride` report whether an override is present.
 
 `OpsPerSample` is **not** a per-method attribute argument — pin it host-wide with `.WithOpsPerSample(n)` or `--ops-per-sample n`. Only `Iterations` and `WarmupIterations` are pinnable per method.
 
@@ -151,7 +152,12 @@ public class DatabaseBenchmarks
 
 ### `[IsolatedProcess]` / `[InProcess]`
 
-`[IsolatedProcess]` runs a benchmark in a freshly spawned child process instead of in-process. `[InProcess]` forces in-process execution even when the harness-wide default is isolated. Apply to a method, or to a class to affect every benchmark it declares (`AttributeUsage = Method | Class`, `Inherited = true`).
+Isolation is the **default**: every benchmark class runs in its own freshly spawned worker process. `[IsolatedProcess]` and `[InProcess]` are the per-method/per-class granular controls on top of that default. Apply either to a method, or to a class to affect every benchmark it declares (`AttributeUsage = Method | Class`, `Inherited = true`).
+
+| Attribute | Effect |
+|---|---|
+| `[IsolatedProcess]` | The benchmark gets its **own dedicated worker** (finest granularity - one worker per method, not one per class). Use it when a benchmark is sensitive to runtime warmup state from siblings. |
+| `[InProcess]` | Forces in-process execution for that method/class, even though the default is isolated. The opt-out at the method/class scope. |
 
 ```csharp
 public class StartupBenchmarks
@@ -162,7 +168,9 @@ public class StartupBenchmarks
 }
 ```
 
-Each isolated benchmark runs in a clean CLR, so it isn't influenced by JIT, GC, or thread-pool state warmed up by sibling benchmarks. The host re-runs the entry assembly for the child, executes only that one benchmark, and reads the result back through a temporary file (never stdout, so the child's console output can't corrupt the data). It uses internal `--nb-isolated-run` / `--nb-isolated-output` flags you never pass yourself. Isolation trades a process launch per benchmark for measurement cleanliness; use it only when a benchmark is sensitive to runtime warmup state. In-process and isolated benchmarks coexist in one suite and run separately.
+Each isolated benchmark runs in a clean CLR, so it isn't influenced by JIT, GC, or thread-pool state warmed up by sibling benchmarks. The harness launches a dedicated `nbworker` executable, sends the work over a binary protocol, and reads results back (never via stdout, so the worker's console output can't corrupt the data). The whole-run opt-outs are `--in-process` / `WithIsolation(false)`; `--dry-run` is always in-process. In-process and isolated benchmarks coexist in one suite and run separately - results carry an `IsolationStatus` and the reporter shows an `Iso` column in mixed-isolation tables.
+
+A body that captures local state falls back to the host with a labelled reason (`IsolationStatus.InProcessCapturedState`); use `Benchmark.Run(prepare:, body:)` / `BenchmarkSuite.WithState(...)` to hand the worker a recipe instead of a value. See the core skill's [isolation reference](../nbenchmark/references/isolation.md) for the worker model, runtime profiles, and the capture fallback.
 
 ### `[InstanceLifetime]`
 
@@ -177,7 +185,7 @@ With `PerClass` and multiple `[Benchmark]` methods sharing mutable state, the an
 
 ### `[Runtimes]`
 
-Declares target runtimes for cross-runtime comparison (`RuntimeMoniker.Net8` / `Net9` / `Net10`). The harness builds and runs each runtime in its own child process. Apply to a class only.
+Declares target runtimes for cross-runtime comparison (`RuntimeMoniker.Net8` / `Net9` / `Net10`). The harness builds and runs each runtime in its own worker process. Suite-mode multi-runtime requires `[BenchmarkPlan]`. Apply to a class only.
 
 ```csharp
 [Runtimes(RuntimeMoniker.Net8, RuntimeMoniker.Net10)]
@@ -222,7 +230,8 @@ Classes are instantiated via `Activator.CreateInstance`, so they need a **public
 | `WithAutoTune(options)` / `WithAutoTune(preset)`     | Bound/steer the adaptive loop                                               |
 | `WithOpsPerSample(n)`                                | Pin K — body invocations per timed sample                                   |
 | `WithDiagnostics(options)` / `WithDiagnostics(mode)` | GC/heap/exception/CPU-time diagnostics                                       |
-| `WithIsolation(bool = true)`                         | Run all benchmarks in dedicated child processes                             |
+| `WithIsolation(bool = true)`                         | Superseded - isolation is the default. `WithIsolation(false)` opts back into the host, deliberately and silently |
+| `WithRuntimeProfile(profile)`                        | Runtime-startup config (`SteadyState`/`Production`/`ServerGc`/`Host`); default `SteadyState` |
 | `WithCrossClassSignificance(bool = true)`            | Run significance tests across classes (default false - within-class only)   |
 | `WithInstanceLifetime(lifetime)`                     | `PerClass` (default) or `PerMethod` instance reuse                          |
 | `WithCategoryFilter(include?, exclude?)`             | Run only benchmarks matching the category filter                            |
@@ -254,10 +263,12 @@ dotnet run -- --filter Sort* --iterations 1000 --reporter markdown --output ./re
 dotnet run -- --list        # discover without running
 dotnet run -- --dry-run     # wire up everything, never invoke the body
 dotnet run -- --detail advanced
-dotnet run -- --in-process  # force all benchmarks in-process (overrides [IsolatedProcess])
+dotnet run -- --in-process  # opt out of worker isolation; measure in this process
+dotnet run -- --strict-isolation  # fail if any benchmark could not be isolated
+dotnet run -- --runtime-profile production  # measure under tiered+PGO+R2R
 ```
 
-Frequently used flags: `--filter`, `--iterations`, `--warmup`, `--auto-tune`, `--ops-per-sample`, `--ci-target`, `--min-samples`, `--max-samples`, `--min-warmup`, `--max-warmup`, `--max-tuning-time`, `--confidence`, `--alpha`, `--reporter`, `--output`, `--order`, `--seed`, `--detail`, `--list`, `--dry-run`, `--in-process`, `--profile`, `--force-gc`, `--no-allocations`, `--threshold-pct`, `--help`/`-h`.
+Frequently used flags: `--filter`, `--iterations`, `--warmup`, `--auto-tune`, `--ops-per-sample`, `--ci-target`, `--min-samples`, `--max-samples`, `--min-warmup`, `--max-warmup`, `--max-tuning-time`, `--confidence`, `--alpha`, `--reporter`, `--output`, `--order`, `--seed`, `--detail`, `--list`, `--dry-run`, `--in-process`, `--strict-isolation`, `--verify-isolation`, `--runtime-profile`, `--stream-samples`, `--emit-raw`, `--launch-count`, `--profile`, `--force-gc`, `--no-allocations`, `--threshold-pct`, `--help`/`-h`.
 
 If you use the standalone `NBenchmark.Tool` global tool (`dotnet benchmark`), it also accepts `--project <path>` (builds a .csproj with `dotnet build -c Release` and benchmarks the resulting DLL) and `--assembly <path>` (benchmarks a pre-built DLL). With neither, it auto-discovers `*.dll` in the current directory. All other flags are forwarded to `BenchmarkHarness.Create`.
 
@@ -314,7 +325,7 @@ For richer assertions (allocation budgets, P95 limits, baseline files) inside yo
 
 ## Telemetry (OpenTelemetry / OTLP)
 
-NBenchmark emits a full set of OpenTelemetry metrics and traces through a `Meter` / `ActivitySource` (name `"NBenchmark"`). Pass `--otlp-endpoint <url>` to export them to a collector; the endpoint is forwarded to isolated children so they stream to the same place as the parent.
+NBenchmark emits a full set of OpenTelemetry metrics and traces through a `Meter` / `ActivitySource` (name `"NBenchmark"`). Pass `--otlp-endpoint <url>` to export them to a collector; the endpoint is forwarded to workers so they stream to the same collector as the host.
 
 ```bash
 dotnet run -c Release -- --otlp-endpoint http://localhost:4317
@@ -328,10 +339,11 @@ See [references/telemetry.md](references/telemetry.md) for every instrument name
 
 - [cli.md](references/cli.md) - every CLI flag, exit codes, CI examples
 - [telemetry.md](references/telemetry.md) - OpenTelemetry instruments, spans, resource attributes
+- [isolation.md](../nbenchmark/references/isolation.md) - worker model, runtime profiles, `IsolationStatus`, `--strict-isolation`/`--verify-isolation` (cross-cutting)
 
 ## Related skills
 
-- **nbenchmark** — Single and Suite modes, `MeasurementOptions`, `BenchmarkResult`
+- **nbenchmark** — Single and Suite modes, `MeasurementOptions`, `BenchmarkResult`, worker isolation
 - **nbenchmark-reporters** — reporter pipeline, detail levels, custom reporters, observers
 - **nbenchmark-integration** — performance thresholds as xUnit/NUnit/MSTest tests
-- **nbenchmark-troubleshooting** — analyzer diagnostics, wrong results, tuning
+- **nbenchmark-troubleshooting** — analyzer diagnostics (NB0001-NB0014), wrong results, tuning

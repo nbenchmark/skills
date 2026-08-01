@@ -12,7 +12,7 @@ var options = new MeasurementOptions
 };
 ```
 
-`Iterations`, `WarmupIterations`, and `OpsPerSample` are `int?`: `null` (the default) means auto-resolve. Constants: `MeasurementOptions.MinIterations` (0), `MeasurementOptions.MaxIterations` (100,000), `MeasurementOptions.MaxWarmupIterations` (10,000), `MeasurementOptions.MaxOpsPerSampleLimit` (16,777,216), `MeasurementOptions.MaxLaunchCount` (100), `MeasurementOptions.MinHistogramBucketCount` (5), `MeasurementOptions.MaxHistogramBucketCount` (100), `MeasurementOptions.DefaultMinimumPracticalEffect` (0.147). `MeasurementOptions.Default` is a ready-made default instance (all three counts `null`). `MeasurementOptions.For(profile)` is a factory that sets `Profile`.
+`Iterations`, `WarmupIterations`, and `OpsPerSample` are `int?`: `null` (the default) means auto-resolve. Constants: `MeasurementOptions.MinIterations` (0), `MeasurementOptions.MaxIterations` (100,000), `MeasurementOptions.MaxWarmupIterations` (10,000), `MeasurementOptions.MaxOpsPerSampleLimit` (16,777,216), `MeasurementOptions.MinHistogramBucketCount` (5), `MeasurementOptions.MaxHistogramBucketCount` (100), `MeasurementOptions.DefaultMinimumPracticalEffect` (0.147), `MeasurementOptions.DefaultMaxRawSamples` (4096), `MeasurementOptions.UnboundedRawSamples` (0). The replicate-count ceiling lives on the `LaunchCounts` static class (`LaunchCounts.Max = 100`), not on `MeasurementOptions` - see [LaunchCount](#launchcount) below. `MeasurementOptions.Default` is a ready-made default instance (all three counts `null`). `MeasurementOptions.For(profile)` is a factory that sets `Profile`.
 
 ## How each mode sets options
 
@@ -120,9 +120,33 @@ The alpha threshold a p-value must fall below to be reported as **Significant**.
 
 The minimum practical effect in [0, 1] required for a benchmark to be considered meaningfully different. The active significance strategy maps its own effect metric to this normalized value via `EffectSize.PracticalValue`. When the reported practical value is below this threshold, the Sig verdict is downgraded to `NotSignificant` and the magnitude label is forced to `neg`, and a warning records the downgrade. The default `0.147` is a "small" Cliff's δ, so a `✓` means "real and at least a small effect". Set to `0` to restore p-value-only Sig semantics; set to `null` to disable the gate entirely. Suite/Harness: `.WithMinimumPracticalEffect(delta)`.
 
-### LaunchCount — default `1`, range `1`-`100`
+### LaunchCount — not on `MeasurementOptions`
 
-Number of times to repeat the benchmark as separate launches. `1` (the default) runs the benchmark once. Higher values trigger per-launch aggregation and populate `BenchmarkResult.LaunchStatistics` (per-launch medians, mean, stddev, CI). Suite/Harness: `.WithLaunchCount(n)`.
+The replicate count - how many separate worker processes measure a benchmark - is **not** a field on `MeasurementOptions`. A replicate is a worker, and `MeasurementOptions` is serialized whole into each worker's request; a worker has no use for a count it is told to repeat, since it measures exactly once. The count lives on the `LaunchCounts` static class and is passed explicitly by whichever coordinator spends it.
+
+| `LaunchCounts` member | Value / signature | Purpose |
+|---|---|---|
+| `Single` | `1` | One launch - measure once, in one process. Single/Suite default. |
+| `Max` | `100` | The ceiling on any requested launch count. |
+| `HarnessDefault` | `3` | What Harness mode launches when the caller pinned nothing. Above one so the cross-launch interval surfaces without users asking. |
+| `IsValid` | `bool IsValid(int count)` | `count is >= Single and <= Max`. |
+| `Clamp` | `int Clamp(int count)` | Brings `count` into range rather than rejecting it (for attribute paths, where the value is a compile-time constant). |
+
+Set it with `WithLaunchCount(n)` (suite/harness), `--launch-count <n>` (CLI), `[Benchmark(LaunchCount = n)]` (harness attribute), or `LaunchCount` on the test-integration attributes. Higher values trigger per-launch aggregation and populate `BenchmarkResult.LaunchStatistics` (per-launch medians, mean, stddev, CI, and the reproducibility diagnostics `ProcessVarianceRatio` / `BetweenLaunchDispersion`).
+
+### MaxRawSamples — default `4096` (`MeasurementOptions.DefaultMaxRawSamples`), range `0` or positive
+
+How many raw samples an isolated worker returns per benchmark. `MeasurementOptions.UnboundedRawSamples` (0) returns every sample; any positive value bounds the returned array. CLI: `--emit-raw` lifts the cap entirely (equivalent to `UnboundedRawSamples`).
+
+This bounds only what crosses a process boundary. Every statistic NBenchmark reports (median, interval, outlier count) is computed inside the worker over the complete sample array, so raising or lowering this cannot move a reported number. It affects only the sample dump in JSON output, the Console density sparkline, and the coordinator-side significance test - all distribution properties, which a few thousand samples describe as faithfully as a hundred thousand.
+
+The subset is drawn uniformly at random from the full array and kept in measurement order, seeded from the run's own seed so a repeat of the same configuration ships the same samples. It is not a prefix: the first n samples are the part of the run nearest to warmup, which is the least representative slice available. In-process runs are unaffected - there is no boundary to cross, so they always hold the complete array.
+
+### StreamSamples — default `false`
+
+Whether an isolated worker forwards its live per-sample observer stream (`IMeasurementObserver.OnSample`) back to the coordinator. Off by default. CLI: `--stream-samples`.
+
+Like `MaxRawSamples` this bounds only what crosses a process boundary and cannot move a reported number. It is off by default because it is the one channel whose cost scales with how fast the benchmarked code is: a nanosecond body emits thousands of sample events, and encoding them puts the cost of observing the run inside the run. Phase transitions, detector snapshots, and results cross either way - they are emitted a handful of times per benchmark. In-process runs ignore this: the observer is called directly, so there is no boundary to forward across. See [observers.md](../../nbenchmark-reporters/references/observers.md#isolated-worker-delivery).
 
 ### SuppressPerClassIndependenceWarning — default `false`
 

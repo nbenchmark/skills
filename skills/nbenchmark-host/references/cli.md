@@ -62,7 +62,9 @@ dotnet run -- --ops-per-sample 256 --ci-target 0.01
 
 ### `--launch-count <n>`
 
-Repeat each benchmark as `n` separate launches, populating `BenchmarkResult.LaunchStatistics` (per-launch medians, mean, stddev, CI). Range `1`-`100`. Harness mode defaults to **3** (Single/Suite modes default to 1).
+Repeat each benchmark as `n` separate launches (worker processes), populating `BenchmarkResult.LaunchStatistics` (per-launch medians, mean, stddev, CI, and the reproducibility diagnostics `ProcessVarianceRatio` / `BetweenLaunchDispersion`). Range `1`-`100` (see the `LaunchCounts` static class). Harness mode defaults to **3** (Single/Suite modes default to 1), so the cross-launch interval surfaces without users asking. With two or more launches, the ratio gate evaluates the **paired** per-replicate ratio (geometric mean with a multiplicative CI) instead of a ratio of aggregated medians. Per-method `[Benchmark(LaunchCount = n)]` overrides; isolated groups take the max across members.
+
+`--launch-count` has no effect under `--in-process` - in-process runs cannot have multiple worker launches, so the count is pinned to 1.
 
 ### `--confidence <value>`
 
@@ -165,7 +167,31 @@ Skip measurement entirely. Equivalent to `--iterations 0 --warmup 0`: classes ar
 
 ### `--in-process`
 
-Run every benchmark in the host process — disables `[IsolatedProcess]` for the run. `[InProcess]` on a method or the global `--in-process` flag overrides everything.
+Run every benchmark in the host process - the opt-out from the isolated-by-default execution model. Each benchmark normally runs in a dedicated worker process; `--in-process` (or `[InProcess]` on a method, or `WithIsolation(false)` in code) disables that for the run. `--dry-run` is always in-process. See the [isolation reference](../../nbenchmark/references/isolation.md) for the worker model and the capture fallback.
+
+### `--strict-isolation`
+
+Fail the run (exit code 1) if any benchmark was not isolated. Failures are grouped by cause with remedies - the capture fallback, a missing worker, an unaddressable plan. The advisory `Iso` column nobody reads is indistinguishable from none; this makes isolation enforceable in CI.
+
+```bash
+dotnet run -c Release -- --strict-isolation --reporter markdown --output ./results
+```
+
+### `--verify-isolation`
+
+Re-measure every benchmark in-process and print how much isolation changed it, as diagnostics only. Publishes nothing. Skipped under `--runtimes` (this process is one runtime, so the comparison would describe a different runtime's worker rather than the host). The per-benchmark delta shows the cost - or benefit - of the host's inherited runtime configuration versus a clean worker.
+
+### `--runtime-profile <name>`
+
+The runtime-startup configuration to measure under: `steady-state` (**default**), `production`, `server-gc`, or `host`. Applied to workers through their environment block at launch; in-process benchmarks inherit the host's configuration and report `host`. See [isolation.md](../../nbenchmark/references/isolation.md#runtime-profiles) for what each profile sets and when to use it.
+
+### `--stream-samples`
+
+Forward the live per-sample observer stream (`IMeasurementObserver.OnSample`) across the worker boundary, in batches of 128 samples or 100 ms - whichever comes first. Phase transitions, detector snapshots, and results cross unconditionally; this is the opt-in for the one channel whose cost scales with how fast the benchmarked code is. Withdrawn automatically when no observer is attached. Second and later replicates of a multi-launch run do not forward telemetry. In-process runs are unaffected (the observer is called directly). See [observers.md](../../nbenchmark-reporters/references/observers.md#isolated-worker-delivery).
+
+### `--emit-raw`
+
+Lift the 4096-sample cap on raw samples returned from an isolated worker - return every sample. The programmatic equivalents are `MeasurementOptions.MaxRawSamples` and `MeasurementOptions.UnboundedRawSamples`. This bounds only what crosses the process boundary; every reported statistic is computed inside the worker over the complete array, so raising it cannot move a median, interval, or outlier count. See [measurement-options.md](../../nbenchmark/references/measurement-options.md#maxrawsamples).
 
 ### `--cross-class`
 
@@ -173,7 +199,7 @@ Compute significance across all classes instead of per-class (the default). Equi
 
 ### `--runtimes <list>`
 
-Runtimes to compare, comma-separated (e.g. `net8,net9,net10` or `net8.0,net9.0,net10.0`). Each runtime builds and runs in its own child process. Valid values: `net8`, `net9`, `net10`.
+Runtimes to compare, comma-separated (e.g. `net8,net9,net10` or `net8.0,net9.0,net10.0`). Each runtime builds and runs in its own worker process. `--runtimes` overrides `--in-process`. Valid values: `net8`, `net9`, `net10`. Suite-mode multi-runtime runs require a `[BenchmarkPlan]` factory rather than an inline suite, because benchmark bodies are addressed by metadata token which is only valid within the build that produced it. See [isolation.md](../../nbenchmark/references/isolation.md#benchmarkplan---the-escape-hatch).
 
 ### `--profile <mode>`
 
@@ -209,11 +235,13 @@ Warn when the host looks noisy (low core count, unraisable priority, macOS throt
 
 ### `--otlp-endpoint <url>`
 
-OTLP endpoint for the OpenTelemetry SDK (`http://` or `https://`); forwarded to isolated children.
+OTLP endpoint for the OpenTelemetry SDK (`http://` or `https://`); forwarded to workers so they stream to the same collector as the host.
 
 ### `--threshold-pct <n>`
 
-Exit with **code 1** if any benchmark regresses more than `n`% against the baseline (`n` >= 1). A benchmark regresses when `candidate.Median / baseline.Median > 1.0 + n/100`. If the baseline median is `0`, any non-baseline benchmark with a positive median is treated as regressed. Baseline = the `[Benchmark(Baseline = true)]` method, or the fastest median if none. Errored benchmarks are excluded.
+Exit with **code 1** if any benchmark regresses more than `n`% against the baseline (`n` >= 1). A benchmark regresses when the ratio of candidate to baseline exceeds `1.0 + n/100`. If the baseline median is `0`, any non-baseline benchmark with a positive median is treated as regressed. Baseline = the `[Benchmark(Baseline = true)]` method, or the fastest median if none. Errored benchmarks are excluded.
+
+When launch data is available (the Harness default is 3 launches), the gate evaluates the **paired** per-replicate ratio - the geometric mean of per-launch ratios with a multiplicative confidence interval - instead of a ratio of aggregated medians. The two can disagree, which is exactly the case the pairing exists for. See [significance-and-outliers.md](../../nbenchmark/references/significance-and-outliers.md#what-gates-on-it).
 
 ```bash
 dotnet run -- --threshold-pct 10
@@ -228,7 +256,7 @@ Print help text and exit.
 | Code | Meaning |
 |---|---|
 | `0` | Run completed. Errored benchmarks are recorded but not fatal. |
-| `1` | An argument error (unknown flag, missing value, out-of-range `--iterations`/`--warmup`/`--ops-per-sample`/`--ci-target`/`--min-samples`/`--max-samples`/`--min-warmup`/`--max-warmup`/`--max-tuning-time`/`--launch-count`, bad `--confidence`/`--alpha`/`--min-practical-effect`/`--seed` format, unknown `--auto-tune`/`--autotune-cap-behavior` preset, unknown `--reporter`/`--observer`, invalid `--detail`/`--profile`/`--outlier`/`--tail-basis`/`--diagnostics`/`--priority`, bad `--cpu-affinity`/`--percentiles`/`--runtimes`/`--otlp-endpoint` value), **or** a `--threshold-pct` regression. |
+| `1` | An argument error (unknown flag, missing value, out-of-range `--iterations`/`--warmup`/`--ops-per-sample`/`--ci-target`/`--min-samples`/`--max-samples`/`--min-warmup`/`--max-warmup`/`--max-tuning-time`/`--launch-count`, bad `--confidence`/`--alpha`/`--min-practical-effect`/`--seed` format, unknown `--auto-tune`/`--autotune-cap-behavior` preset, unknown `--reporter`/`--observer`, invalid `--detail`/`--profile`/`--outlier`/`--tail-basis`/`--diagnostics`/`--priority`/`--runtime-profile`, bad `--cpu-affinity`/`--percentiles`/`--runtimes`/`--otlp-endpoint` value), a `--threshold-pct` regression, **or** a `--strict-isolation` failure (one or more benchmarks could not be isolated). An errored benchmark is not counted as a strict-isolation failure - it failed to measure, not failed to isolate. |
 
 Even when exit code `1` is set, the run still completes — discovery, measurement, and reporting proceed — so you see output. On a `--threshold-pct` regression, reporters still flush their output. The non-zero code ensures CI catches the problem.
 
@@ -237,6 +265,9 @@ Even when exit code `1` is set, the run still completes — discovery, measureme
 ```bash
 # Fail the build if anything is >10% slower than baseline; keep a markdown report
 dotnet run -c Release -- --threshold-pct 10 --reporter markdown --output ./results
+
+# Fail the build if any benchmark could not be isolated (CI enforcement of the default)
+dotnet run -c Release -- --strict-isolation --reporter json --output ./results
 
 # Reproducible run in declaration order
 dotnet run -- --order declaration --seed 12345

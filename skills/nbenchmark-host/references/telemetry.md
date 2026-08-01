@@ -12,7 +12,7 @@ NBenchmark emits a full set of OpenTelemetry instruments through an internal `Me
 dotnet run -c Release -- --otlp-endpoint http://localhost:4317
 ```
 
-`--otlp-endpoint <url>` accepts an absolute `http://` or `https://` URL. The harness mirrors it into `OTEL_EXPORTER_OTLP_ENDPOINT` before spawning isolated children, so isolated benchmarks stream to the same collector as the parent.
+`--otlp-endpoint <url>` accepts an absolute `http://` or `https://` URL. The harness mirrors it into `OTEL_EXPORTER_OTLP_ENDPOINT` before launching workers, so isolated benchmarks stream to the same collector as the host.
 
 ### Environment variables
 
@@ -24,9 +24,9 @@ dotnet run -c Release -- --otlp-endpoint http://localhost:4317
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | Forwarded to children. |
 | `OTEL_RESOURCE_ATTRIBUTES` | Standard OTel resource attributes (comma-separated `key=value`). Stamped on the root span. |
 | `OTEL_SERVICE_NAME` | Standard OTel service name. Stamped on the root span as `service.name`. |
-| `NBENCHMARK_OTEL_ENDPOINT` | The internal name for `--otlp-endpoint`. Forwarded to children; mirrored into `OTEL_EXPORTER_OTLP_ENDPOINT` when the user hasn't set it. |
+| `NBENCHMARK_OTEL_ENDPOINT` | The internal name for `--otlp-endpoint`. Forwarded to workers; mirrored into `OTEL_EXPORTER_OTLP_ENDPOINT` when the user hasn't set it. |
 
-All six `OTEL_*` variables are forwarded to isolated child processes verbatim, so a child streams to the same collector as the parent. The in-memory `IMeasurementObserver` callback cannot cross the process boundary, so OTLP is the cross-process telemetry channel.
+All six `OTEL_*` variables are forwarded to workers verbatim, so a worker streams to the same collector as the host. The in-memory `IMeasurementObserver` callback cannot cross the process boundary, so OTLP is the cross-process telemetry channel. For the observer stream that does cross (phase/detector/result events, and opt-in samples via `--stream-samples`), see [observers.md](../../nbenchmark-reporters/references/observers.md#isolated-worker-delivery).
 
 ## Metrics (Meter: `"NBenchmark"`)
 

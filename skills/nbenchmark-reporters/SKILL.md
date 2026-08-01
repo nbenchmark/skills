@@ -1,8 +1,8 @@
 ---
 name: nbenchmark-reporters
-nbenchmarkVersion: v0.32.0
-lastVerified: 2026-07-21
-description: NBenchmark output and reporting. Use when the user wants console, JSON, Markdown, or CSV output, wants to control report detail levels (Simple / Standard / Advanced), stack multiple reporters, write file output to a directory, register a custom reporter via ReporterRegistry, or implement a custom IReporter or IMeasurementObserver. For running benchmarks see the core nbenchmark skill; for the --reporter/--output/--detail CLI flags see nbenchmark-host.
+nbenchmarkVersion: v0.37.0
+lastVerified: 2026-08-01
+description: NBenchmark output and reporting. Use when the user wants console, JSON, Markdown, or CSV output, wants to control report detail levels (Simple / Standard / Advanced), stack multiple reporters, write file output to a directory, register a custom reporter via ReporterRegistry, or implement a custom IReporter or IMeasurementObserver. Covers the Iso column for mixed-isolation tables, the paired ratio interval columns, and report format versioning (schema/epoch stamps). For running benchmarks see the core nbenchmark skill; for the --reporter/--output/--detail CLI flags see nbenchmark-host.
 ---
 
 # NBenchmark Reporters
@@ -108,9 +108,11 @@ Each result also carries an `autoTune` object (resolved warmup/samples/ops, `war
 | StdDev    | Sample standard deviation                     |
 | P95       | 95th percentile                               |
 | P99       | 99th percentile                               |
-| Ratio     | Speed relative to baseline                    |
+| Ratio     | Speed relative to baseline (`n/a` when rows are measured under different runtime configs) |
 | Sig       | `✓` significant, `✗` not significant, `-` n/a |
 | Alloc/op  | Mean bytes/op, or `-` if not measured         |
+
+When a table mixes isolated and in-process rows, an **`Iso`** column appears identifying where each row ran (`isolated`, `in-process`, `in-process (captures)`, etc.), and the `Ratio` is withheld as `n/a` with a footer explaining the withholding - the dominant term across a process boundary is the runtime configuration, not the code. See the core skill's [isolation reference](../nbenchmark/references/isolation.md#the-capture-fallback).
 
 ### Standard — same table + percentile columns and effect size
 
@@ -126,8 +128,19 @@ Adds: range (Min–Max), quartiles (Q1/Q3/IQR), fences (IqrFence only), pre/post
 | -------- | -------------------- | ------------------------------------------ | ---------------------------------------------------------- |
 | Console  | Table only           | Table + standard columns                   | Table + stats block + `auto-tuned:` line below each row    |
 | Markdown | Table only           | Table + standard columns                   | Table + details section (incl. `auto-tuned:` line)         |
-| CSV      | Base columns         | + percentiles, effect, CI, margin %       | + quartiles, fences, shape, adaptive stats, diagnostics    |
-| JSON     | Full record (always) | Full record (always)                       | Full record (always)                                       |
+| CSV      | Base columns (+ `SchemaVersion`/`MeasurementEpoch`/`RuntimeProfile`/`RuntimeKnobs`) | + percentiles, effect, CI, margin %, `RatioCiLower`/`RatioCiUpper`/`RatioReplicates` | + quartiles, fences, shape, adaptive stats, diagnostics    |
+| JSON     | Full record (always, with `schemaVersion`/`measurementEpoch` at the top) | Full record (always)                       | Full record (always)                                       |
+
+Every file reporter stamps `schemaVersion` and `measurementEpoch` (from `ReportFormat.SchemaVersion` / `ReportFormat.MeasurementEpoch`) into its output. See [references/report-format.md](references/report-format.md) for where each reporter places them and the comparability semantics.
+
+## Report format versioning
+
+File reporters carry two version stamps so a consumer storing NBenchmark output over time can tell whether two files may be compared:
+
+- `SchemaVersion` (currently `1`) — whether a consumer can still **parse** the file. Bumped on field renames/removals/type changes, not on additions.
+- `MeasurementEpoch` (currently `3`) — whether a consumer can still **compare** its numbers. Bumped when harness overhead, the default runtime profile, or a statistic's definition changes; not on new fields or formatting.
+
+An absent stamp means the file predates the concept; consumers should reject it rather than assume equivalence to the earliest epoch. See [references/report-format.md](references/report-format.md) for the epoch history, where each reporter stamps them, and a Python consumer example.
 
 ## Custom reporters
 
@@ -158,10 +171,14 @@ Attach with `.WithReporter(new MyReporter())`.
 
 For ratio/significance tables, use `BenchmarkTable.Build(results)` instead of reimplementing the logic:
 
-- Baseline selection — first `[Baseline]`, else fastest median
+- Baseline selection — first `[Baseline]`, else the **largest comparable group** (not the globally fastest row, which is usually the in-process outlier). See `table.MixedIsolationStatuses`.
 - `row.Ratio` — `result.Median / baseline.Median` (`NaN` for errored / single-benchmark runs)
+- `row.RatioSuppressed` — when the row and baseline were measured under different runtime configs, the ratio is withheld as `n/a` instead of a number. Render `RatioSuppressed ? "n/a" : row.Ratio.ToString(...)`.
 - `row.SignificanceLabel` — `"✓"`, `"✗"`, or `""`
+- `row.RatioEstimate` — the paired, log-scale ratio interval (`RatioEstimate?`; `null` unless `LaunchCount >= 2`). `Value`/`Lower`/`Upper`/`IncludesUnity`/`FormatInterval()`.
 - Rows sorted by median ascending
+- `table.MixedIsolationStatuses` — `true` when the table mixes isolated and in-process rows; reporters add an `Iso` column and a footer.
+- `table.RuntimeProfileName` / `table.RuntimeKnobs` — the runtime configuration, surfaced in headers.
 - Run metadata: `table.RunAtUtc`, `WarmupIterations`, `MeasuredIterations`, `ConfidenceLevel`, `OutlierMode`, `TotalDuration`
 - `row.AutoTune` — the per-benchmark adaptive-loop diagnostic (`AutoTuneDiagnostic?`; `null` on dry-run/errored)
 
@@ -219,11 +236,12 @@ See [references/observers.md](references/observers.md) for the full observer/pro
 
 ## References
 
-- [observers.md](references/observers.md) - `IMeasurementObserver`, event types, `ObserverRegistry`, `IBenchmarkProgress`
+- [observers.md](references/observers.md) - `IMeasurementObserver`, event types, `ObserverRegistry`, `IBenchmarkProgress`, isolated-worker delivery
+- [report-format.md](references/report-format.md) - `ReportFormat.SchemaVersion`/`MeasurementEpoch`, where each reporter stamps them, comparability semantics
 
 ## Related skills
 
-- **nbenchmark** — running benchmarks, `BenchmarkResult` fields
-- **nbenchmark-host** — `--reporter`, `--output`, `--detail`, `--observer` CLI flags
+- **nbenchmark** — running benchmarks, `BenchmarkResult` fields, `IsolationStatus`
+- **nbenchmark-host** — `--reporter`, `--output`, `--detail`, `--observer`, `--stream-samples` CLI flags
 - **nbenchmark-integration** — assertion-style reporting inside test frameworks
-- **nbenchmark-troubleshooting** — output/path issues, interpreting warnings
+- **nbenchmark-troubleshooting** — output/path issues, interpreting warnings, NB0014

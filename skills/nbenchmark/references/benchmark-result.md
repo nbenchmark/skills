@@ -21,6 +21,9 @@ double? p95 = result.GetPercentile(0.95);
 | `Categories` | `IReadOnlyList<string>` | Categories tagged on the method/class |
 | `ParameterSet` | `IReadOnlyList<BenchmarkParameter>` | Parameter values for parameterised benchmarks; empty otherwise |
 | `RuntimeMoniker` | `string` | Runtime the benchmark ran under (e.g. `"Net10"`); empty for in-process runs |
+| `RuntimeProfileName` | `string` | The runtime-startup configuration this result was **actually** measured under - not the one requested. `"host"` means the measurement ran in a process NBenchmark did not launch, so it inherited whatever runtime config that process started with; every in-process result reports this. Results under different profiles are never compared. Default `"host"`. See [isolation.md](isolation.md#runtime-profiles). |
+| `RuntimeKnobs` | `string` | The runtime-startup knobs in effect, e.g. `"tiered=off pgo=off r2r=off"`. Read from the measuring process's own environment rather than derived from the requested profile. Empty when none are set. |
+| `IsolationStatus` | `IsolationStatus` | Where this measurement ran, and - when it did not run in a worker - why not. Every result starts at `InProcessRequested` (the **runtime** default the runner stamps so an un-marked result never silently claims to be isolated) and is re-stamped to `Isolated` only when a worker actually launched. See [isolation.md](isolation.md#isolationstatus) for the values, labels, causes, and remedies. |
 | `IsBaseline` | `bool` | Whether this result is the suite baseline |
 | `RunAtUtc` | `DateTimeOffset` | When the benchmark ran |
 
@@ -126,7 +129,11 @@ Contract: `MeasuredDuration <= TotalDuration`. Errored entries from pre-runner f
 |---|---|---|
 | `LaunchStatistics` | `LaunchStatistics?` | Populated when `LaunchCount > 1`; `null` otherwise |
 
-`LaunchStatistics` records `LaunchCount`, `LaunchMean`, `LaunchStandardDeviation`, `LaunchMedian`, `LaunchConfidenceIntervalLower` / `Upper`, and `Launches` (`IReadOnlyList<LaunchDetail>`). Each `LaunchDetail` has `LaunchIndex`, `Median`, `Mean`, `StandardDeviation`, `Iterations`, `Duration`, `Errored`, `ErrorMessage`.
+`LaunchStatistics` records `LaunchCount`, `LaunchMean`, `LaunchStandardDeviation`, `LaunchMedian`, `LaunchConfidenceIntervalLower` / `Upper`, `BetweenLaunchDispersion`, `ProcessVarianceRatio`, and `Launches` (`IReadOnlyList<LaunchDetail>`). Each `LaunchDetail` has `LaunchIndex`, `Median`, `Mean`, `StandardDeviation`, `Iterations`, `Duration`, `Errored`, `ErrorMessage`.
+
+`BetweenLaunchDispersion` is the coefficient of variation of the per-launch medians - run-to-run variation as a fraction of the typical measurement (the **reproducibility** of the number, as opposed to the precision of any one launch). `null` when fewer than two launches succeeded.
+
+`ProcessVarianceRatio` is how much larger the spread **between** processes is than the spread **within** one. Near 1 means the within-process confidence interval fairly describes what a re-run would produce; a large value means it does not. This exposes the most dangerous failure mode in benchmarking: a tight interval around a value that does not reproduce. `null` when fewer than two launches succeeded.
 
 ## Diagnostics
 
@@ -156,6 +163,7 @@ Contract: `MeasuredDuration <= TotalDuration`. Errored entries from pre-runner f
 
 ```csharp
 public enum SignificanceVerdict { NotTested, Significant, NotSignificant }
+public enum IsolationStatus { Isolated = 0, InProcessRequested, InProcessCapturedState, InProcessLiveFixture, InProcessUnaddressablePlan, InProcessNoWorker }
 public enum OutlierMode { None, RemoveTop5Percent, RemoveTopAndBottom5Percent, IqrFence, MedianAbsoluteDeviation }
 public enum RunOrder { Random, Declaration }
 public enum MeasurementProfile { Realistic, Independent }

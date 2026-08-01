@@ -1,8 +1,8 @@
 ---
 name: nbenchmark
-nbenchmarkVersion: v0.32.0
-lastVerified: 2026-07-21
-description: Core NBenchmark skill for writing .NET benchmarks with Single mode (Benchmark.Run / RunAsync) and Suite mode (BenchmarkSuite fluent builder). Use when the user wants to benchmark a single method, compare multiple implementations, configure measurement options, interpret results, or prevent dead-code elimination. For dedicated benchmark projects with [Benchmark] attributes and a CLI, see nbenchmark-host. For output formats see nbenchmark-reporters; for failing tests on regressions see nbenchmark-integration.
+nbenchmarkVersion: v0.37.0
+lastVerified: 2026-08-01
+description: Core NBenchmark skill for writing .NET benchmarks with Single mode (Benchmark.Run / RunAsync) and Suite mode (BenchmarkSuite fluent builder). Use when the user wants to benchmark a single method, compare multiple implementations, configure measurement options, interpret results, or prevent dead-code elimination. Covers worker-process isolation (the default in every mode), prepared state, and runtime profiles. For dedicated benchmark projects with [Benchmark] attributes and a CLI, see nbenchmark-host. For output formats see nbenchmark-reporters; for failing tests on regressions see nbenchmark-integration.
 ---
 
 # NBenchmark
@@ -19,6 +19,24 @@ Install: `dotnet add package NBenchmark`. Add `NBenchmark.Reporters.Console` for
 
 > The rich console package is `NBenchmark.Reporters.Console` (namespace `NBenchmark.Reporters.Console`). File reporters (JSON/Markdown/CSV) are built into the core `NBenchmark` package.
 
+## Process isolation
+
+Every mode - Single, Suite, Harness, and the test-framework integrations - measures in a **dedicated worker process by default**. JIT tiering, dynamic PGO, and GC flavour are fixed at process start, so a benchmark measured in a host process inherits whatever the preceding benchmarks left behind. The worker is a dedicated `nbworker` executable launched with a known runtime configuration.
+
+A benchmark body that captures a local variable, parameter, or `this` from its enclosing scope cannot be addressed in a worker and falls back to the host with a labelled reason (`IsolationStatus`). In Suite mode, one capturing body takes every sibling in-process. The remedy is **prepared state** - pass the preparation as its own delegate so the worker builds the state itself.
+
+```csharp
+var data = BuildData();   // a local in the caller's scope
+
+// Captures `data` -> runs in-process (InProcessCapturedState)
+Benchmark.Run(() => Sort(data));
+
+// Prepared state -> runs in a worker
+Benchmark.Run(prepare: () => BuildData(), body: d => Sort(d));
+```
+
+Deliberate host measurement: `Benchmark.RunInProcess`. Opt a suite out: `WithIsolation(false)`. The result's `IsolationStatus` field names exactly why a measurement ran where it did, and an `Iso` column appears in mixed-isolation tables. See [references/isolation.md](references/isolation.md) for the full worker model, runtime profiles, and the capture fallback.
+
 ## When to use this skill
 
 - Add benchmarking to a .NET project
@@ -27,10 +45,12 @@ Install: `dotnet add package NBenchmark`. Add `NBenchmark.Reporters.Console` for
 - Configure iterations, warmup, outlier mode, confidence level, or significance level
 - Understand what the output numbers mean
 - Prevent dead-code elimination in benchmarks
+- Run a benchmark in a worker process (the default) or deliberately in-process
+- Pass prepared state so a worker can build it (the capture-fallback remedy)
 
 ## Single Mode
 
-Eight static methods on `Benchmark`. Every overload takes `(delegate, MeasurementOptions? options = null, string name = "Benchmark", CancellationToken cancellationToken = default)`.
+The `Benchmark` static class exposes three families: `Run` / `RunAsync` (measure in a worker by default), `RunInProcess` / `RunInProcessAsync` (measure in this process, deliberately), and `RunRaw*` (return the raw-sample array). Every overload takes `(delegate, MeasurementOptions? options = null, string name = "Benchmark", CancellationToken cancellationToken = default)`.
 
 ```csharp
 using NBenchmark;
@@ -47,6 +67,33 @@ BenchmarkResult r4 = await Benchmark.RunAsync(async () => await LoadFromDbAsync(
 
 r1.Print();   // plain-text summary (core package; optional detail arg defaults to Simple)
 ```
+
+`Run` / `RunAsync` measure in a worker by default. A body that captures local state falls back to the host (`IsolationStatus.InProcessCapturedState`); use the prepared-state overloads below, or `Benchmark.RunInProcess` when host measurement is the intent.
+
+### Prepared state (`Run` with `prepare`)
+
+Pass the preparation as its own delegate so the worker builds the state in the process that measures it. The remedy for the capture fallback.
+
+```csharp
+// prepare runs once per benchmark, before warmup, in the worker; body receives what it returned
+BenchmarkResult r = Benchmark.Run(
+    prepare: () => BuildData(),
+    body:    d  => Sort(d));
+```
+
+Same shape for sync/async, void/returning, and `RunRaw` variants - `Func<TState> prepare` is prepended to the signature. Both `prepare` and `body` must capture nothing. `prepare` runs once, not per iteration - a body that mutates its state sees the mutation on every iteration after the first.
+
+### Deliberate in-process (`RunInProcess`)
+
+`Benchmark.RunInProcess` / `RunInProcessAsync` measure in this process deliberately and without a warning - the right choice, not a fallback, for cold-start/first-call cost, a body that must observe host state, or a comparison against a number produced before workers existed. Stamps `IsolationStatus.InProcessRequested`. Same overload shapes as `Run`.
+
+### Pre-warming a worker (`Warmup`)
+
+```csharp
+Benchmark.Warmup();   // pre-warm a worker in the background
+```
+
+Optional. A worker costs roughly 70 ms to start; `Benchmark.Warmup()` hides that cost from the first `Benchmark.Run`. Worth calling at the start of a script, or before a timed section of a tool. Fire-and-forget by design - the run that needs the worker will report any failure better than this can. See [references/isolation.md](references/isolation.md#benchmarkwarmup).
 
 ### Raw samples (`RunRaw*`)
 
@@ -159,8 +206,11 @@ Arity-2 and arity-3 overloads take `Func<T1, T2, TResult>` / `Func<T1, T2, T3, T
 | `WithObserver(observer)`                               | Non-perturbing `IMeasurementObserver` telemetry       |
 | `WithCategories(params string[])`                      | Tag every entry in the suite                          |
 | `WithCategoryFilter(include?, exclude?)`               | Run only matching categories                          |
-| `WithIsolation(bool = true)`                           | Run the suite in a dedicated child process            |
-| `WithRuntimes(params RuntimeMoniker[])`                | Run across .NET runtimes (`Net8`/`Net9`/`Net10`)      |
+| `WithIsolation(bool = true)`                           | Superseded - isolation is the default. `WithIsolation(false)` opts back into the host, deliberately and silently |
+| `WithRuntimeProfile(profile)`                          | Runtime-startup config (`SteadyState`/`Production`/`ServerGc`/`Host`); default `SteadyState` |
+| `WithRequireIsolation(bool = true)`                    | Fail the run if any body falls back to in-process (non-opt-out) |
+| `WithState(prepare)`                                   | Prepared state - the worker builds it. Returns `BenchmarkSuite<TState>` |
+| `WithRuntimes(params RuntimeMoniker[])`                | Run across .NET runtimes (`Net8`/`Net9`/`Net10`); requires `[BenchmarkPlan]` |
 
 `RunAsync()` returns `IReadOnlyList<BenchmarkResult>`. Errored benchmarks are included with `Errored == true` and `ErrorMessage` set. Suite teardown is guaranteed to run once setup succeeds, even on cancellation.
 
@@ -177,6 +227,31 @@ var results = await new BenchmarkSuite("JSON Parsers")
     .WithReporter(new MarkdownReporter("results/"))
     .RunAsync();
 ```
+
+### Suite isolation
+
+A suite measures in a **single worker process** by default, so all ratios are paired within-process comparisons - no `WithIsolation()` needed. One capturing `Add` body degrades the whole suite to in-process, because a paired ratio must be a within-process statement. Two escape hatches when a suite holds live state:
+
+```csharp
+// Prepared state - the worker builds it
+var results = await new BenchmarkSuite("Sorting")
+    .WithState(() => BuildData())
+    .Add("BubbleSort", d => BubbleSort(d))
+    .Add("QuickSort",  d => QuickSort(d))
+    .WithBaseline("QuickSort")
+    .RunAsync();
+
+// [BenchmarkPlan] - the worker invokes the factory itself; nothing needs to be serializable
+await BenchmarkSuite.RunPlanAsync(BuildSuite);
+
+static BenchmarkSuite BuildSuite() =>
+    new BenchmarkSuite("serialization")
+        .Add("json", () => SerializeJson())
+        .Add("msgpack", () => SerializeMsgPack())
+        .WithBaseline("json");
+```
+
+`WithRequireIsolation()` fails the run if any body falls back to in-process for a non-opt-out reason. Multi-runtime suite runs (`WithRuntimes`) require `[BenchmarkPlan]`, because benchmark bodies are addressed by metadata token which is only valid within the build that produced it. A suite carrying both `WithState` and `WithParameter` cannot isolate - the parameter sweep and the state factory are not composable across a process boundary. See [references/isolation.md](references/isolation.md) for the full story.
 
 ## MeasurementOptions defaults
 
@@ -205,9 +280,12 @@ var results = await new BenchmarkSuite("JSON Parsers")
 | `SignificanceTest`           | `null` (uses `DefaultSignificanceTest`) | any `ISignificanceTest` |
 | `SignificanceLevel`          | `0.05`                 | >0 and <1   |
 | `MinimumPracticalEffect`     | `0.147`                | [0, 1] or `null` to disable |
-| `LaunchCount`                | `1`                    | 1–100       |
+| `MaxRawSamples`              | `4096` (`DefaultMaxRawSamples`) | `0` (`UnboundedRawSamples`) or positive |
+| `StreamSamples`              | `false`                | —           |
 | `SuppressPerClassIndependenceWarning` | `false`       | —           |
 | `Environment`                | `null`                 | `EnvironmentOptions` (CPU affinity / priority / dedicated-host guidance) |
+
+`LaunchCount` is **not** a `MeasurementOptions` property - it lives on the `LaunchCounts` static class and is passed by the coordinator that spends it (`WithLaunchCount(n)`, `--launch-count`, `[Benchmark(LaunchCount = n)]`). See [references/measurement-options.md](references/measurement-options.md#launchcount).
 
 `Iterations = 0` signals a dry run: the measured loop is skipped and results are zeroed (the body isn't invoked unless a positive `WarmupIterations` is pinned). `--dry-run` sets both counts to `0`.
 
@@ -227,7 +305,9 @@ The primary metric is the **Median** (robust to outliers). Key fields:
 - `AllocMedian`, `AllocP95`, `AllocMax`, `MeanAllocatedBytes` (when allocations measured)
 - `PValue`, `SignificanceVerdict` (`NotTested` / `Significant` / `NotSignificant`), `Effect` (Cliff's δ effect size), `Omnibus` (Kruskal-Wallis verdict for 3+ groups)
 - `SignificanceTestName`, `SignificanceLevel`
-- `LaunchStatistics` — populated when `LaunchCount > 1` (per-launch medians, mean, stddev, CI)
+- `IsolationStatus` — where the measurement ran and why (`Isolated` / `InProcessRequested` / `InProcessCapturedState` / `InProcessLiveFixture` / `InProcessUnaddressablePlan` / `InProcessNoWorker`). Shown as the `Iso` column in mixed-isolation tables.
+- `RuntimeProfileName`, `RuntimeKnobs` — the runtime-startup configuration actually measured under. Results under different profiles are never compared.
+- `LaunchStatistics` — populated when the launch count > 1 (per-launch medians, mean, stddev, CI, plus the reproducibility diagnostics `ProcessVarianceRatio` / `BetweenLaunchDispersion`)
 - `Diagnostics` — `DiagnosticsResult?` with GC counts, heap info, exceptions/sec, CPU time when enabled
 - `Categories`, `ParameterSet`, `RuntimeMoniker`
 - `AutoTune` — `AutoTuneDiagnostic?` of what the adaptive loop resolved
@@ -245,6 +325,8 @@ With ≥2 non-errored benchmarks and `EnableSignificance = true`, NBenchmark run
 - The `MinimumPracticalEffect` gate (default 0.147 - a "small" Cliff's δ) downgrades a statistically-significant but practically-negligible result to `NotSignificant`. Set to `0` for p-value-only semantics, or `null` to disable the gate.
 - Sig column: `✓` significant, `✗` not significant, `-` not applicable (baseline / disabled / not tested).
 - Significance ≠ importance — always read the **Ratio** column alongside it.
+- A ratio is only formed between rows measured under the same runtime configuration. Mixed-isolation tables show `n/a` for the ratio, an `Iso` column identifying where each row ran, and a footer explaining the withholding. A mixed-process ratio would describe two processes more than two code paths.
+- With two or more launches, the ratio is a **paired** per-replicate estimate (geometric mean with a multiplicative CI); an interval spanning 1.0 means the two benchmarks are not distinguishable at that replicate count. See [references/significance-and-outliers.md](references/significance-and-outliers.md#paired-ratio-estimation).
 
 ## Common patterns
 
@@ -275,13 +357,14 @@ if (result.Errored)
 
 ## References
 
+- [isolation.md](references/isolation.md) - worker model, capture fallback, prepared state, `[BenchmarkPlan]`, runtime profiles, `IsolationStatus`
 - [benchmark-result.md](references/benchmark-result.md) - every `BenchmarkResult` field
 - [measurement-options.md](references/measurement-options.md) - every `MeasurementOptions` property, outlier modes, tuning
-- [significance-and-outliers.md](references/significance-and-outliers.md) - pluggable significance tests, outlier detectors, effect size, warnings
+- [significance-and-outliers.md](references/significance-and-outliers.md) - pluggable significance tests, outlier detectors, effect size, paired ratio estimation, warnings
 
 ## Related skills
 
-- **nbenchmark-host** — attribute-based discovery, CLI, dependency injection, `[IsolatedProcess]`, CI regression gates
+- **nbenchmark-host** — attribute-based discovery, CLI, dependency injection, `[IsolatedProcess]`/`[InProcess]`, CI regression gates
 - **nbenchmark-reporters** — console/JSON/Markdown/CSV output, detail levels, custom reporters
 - **nbenchmark-integration** — enforce performance thresholds as xUnit/NUnit/MSTest tests
-- **nbenchmark-troubleshooting** — analyzer diagnostics (NB0001-NB0013), wrong results, tuning
+- **nbenchmark-troubleshooting** — analyzer diagnostics (NB0001-NB0014), wrong results, tuning

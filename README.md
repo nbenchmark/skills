@@ -6,11 +6,11 @@ AI agent skills for [NBenchmark](https://github.com/nbenchmark/nbenchmark), a li
 
 | Skill | Description |
 |---|---|
-| **nbenchmark** | Core benchmarking with Single mode (`Benchmark.Run` / `RunAsync`) and Suite mode (`BenchmarkSuite` fluent builder) |
-| **nbenchmark-host** | Harness mode for dedicated benchmark projects - attribute-based discovery, CLI flags, `[IsolatedProcess]`, dependency injection, and CI/CD regression detection |
-| **nbenchmark-reporters** | Reporter pipeline for console, JSON, Markdown, and CSV output, report detail levels, plus custom reporter creation |
-| **nbenchmark-integration** | Enforce performance thresholds as xUnit, NUnit, or MSTest tests - attributes, `PerformanceAssert`, and baseline regression checks |
-| **nbenchmark-troubleshooting** | Diagnosing analyzer diagnostics (NB0001-NB0013), incorrect results, discovery issues, and tuning measurement parameters |
+| **nbenchmark** | Core benchmarking with Single mode (`Benchmark.Run` / `RunAsync`) and Suite mode (`BenchmarkSuite` fluent builder) - covers worker-process isolation (the default in every mode), prepared state, and runtime profiles |
+| **nbenchmark-host** | Harness mode for dedicated benchmark projects - attribute-based discovery, CLI flags, `[IsolatedProcess]`/`[InProcess]` (worker isolation is the default), dependency injection, and CI/CD regression detection |
+| **nbenchmark-reporters** | Reporter pipeline for console, JSON, Markdown, and CSV output, report detail levels, the `Iso` column, paired ratio interval columns, report format versioning, plus custom reporter creation |
+| **nbenchmark-integration** | Enforce performance thresholds as xUnit, NUnit, or MSTest tests - tests run in a worker by default; `RequireIsolation`, `[AllowInProcessGate]`, `LaunchCount`, attributes, `PerformanceAssert`, and baseline regression checks |
+| **nbenchmark-troubleshooting** | Diagnosing analyzer diagnostics (NB0001-NB0014), the isolation capture fallback, incorrect results, discovery issues, and tuning measurement parameters |
 
 ## Installation
 

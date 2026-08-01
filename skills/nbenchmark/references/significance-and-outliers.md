@@ -120,6 +120,54 @@ Significance.ComputeSignificance(results, rawSamples, myTest, significanceLevel:
 
 `ComputeSignificance` mutates `results` in place: assigns `PValue`, `SignificanceVerdict`, `Effect`, `MedianShift`, `Omnibus`, and may append to `Warnings`.
 
+## Paired ratio estimation
+
+The plain `Ratio` column divides two aggregated medians and can say nothing about how much that number would move on a re-run. When the launch count (see the `LaunchCounts` static class) is **two or more**, NBenchmark computes a paired, log-scale ratio estimate instead, and `--threshold-pct` gates on it.
+
+### Why paired
+
+A comparison group is measured **co-resident in one worker per replicate**: replicate *i* of the candidate and replicate *i* of the baseline ran in the same process, on the same core draw, under the same thermal state and the same address-space layout. Dividing them cancels all of that out of the ratio. Dividing the two *aggregated* medians instead throws the pairing away and leaves every worker-to-worker difference in the numerator and denominator independently - which is the entire statistical reason the group is co-resident, discarded at the last step.
+
+### Why the log scale
+
+A ratio is multiplicative, and its sampling distribution is right-skewed: 2x slower and 2x faster are equally large effects but sit at +1.0 and -0.5 on a linear scale. Taking logs makes them symmetric (+0.69 and -0.69), which is what a Student-t interval assumes. Exponentiating back gives an interval that is multiplicatively symmetric about the estimate and cannot straddle zero - a linear interval on a ratio near 1.0 with real spread routinely produces a negative lower bound, which is not a ratio.
+
+The point estimate is the **geometric** mean of the per-replicate ratios, which is *not* the ratio of the arithmetic means. That difference is the correction: the geometric mean is the unbiased estimator of a multiplicative effect, and it is unmoved by one replicate in which *both* benchmarks happened to run slowly.
+
+### `RatioEstimate`
+
+The estimate lands on `BenchmarkTable` rows (and on each `BenchmarkResult` via the table) as a `RatioEstimate` (namespace `NBenchmark`):
+
+| Property | Type | Description |
+|---|---|---|
+| `Value` | `double` | The estimated ratio: the geometric mean of the per-replicate ratios. Above 1.0 means slower than the reference. |
+| `Lower` / `Upper` | `double` | The multiplicative confidence interval on `Value`. Read as the range the ratio would plausibly land in if the whole run were repeated. |
+| `Replicates` | `int` | How many replicates were paired to produce this. Always at least two. |
+| `ConfidenceLevel` | `double` | The level `Lower`/`Upper` were computed at. |
+| `IncludesUnity` | `bool` (computed) | Whether the interval contains 1.0 - whether "no difference" is among the values this run cannot rule out. |
+| `FormatInterval()` | `string` | The interval rendered as a multiplicative range, e.g. `"1.08-1.31x"`. Empty when the bounds are not finite. |
+
+An interval **spanning 1.0** means the two benchmarks are not distinguishable at this replicate count, however far `Value` is from 1.0 - which is the question a reader is actually asking when they look at a ratio, and the one a bare number cannot answer. Reporters surface inconclusive ratios (including a unity-spanning warning); CSV writes `RatioCiLower`/`RatioCiUpper`/`RatioReplicates` columns.
+
+### `LogRatio`
+
+The static estimator (namespace `NBenchmark.Stats`):
+
+```csharp
+public static RatioEstimate? Estimate(
+    IReadOnlyList<double> candidate,   // per-replicate medians of the benchmark being measured
+    IReadOnlyList<double> baseline,   // per-replicate medians of the reference, same replicate order
+    double confidenceLevel = 0.95);
+```
+
+Returns `null` when fewer than two replicates can be paired. One pair is a ratio, not an estimate of one - it carries no information about how much the ratio would move on a re-run. Non-positive medians (an errored or unmeasured replicate) drop the whole pair to keep the comparison paired.
+
+### What gates on it
+
+- `--threshold-pct` evaluates the **paired** ratio when launch data is available, instead of a ratio of aggregated medians. A gate can therefore change verdict on unchanged code, because the estimate it reads changed.
+- Cross-configuration ratios (e.g. tiered vs not, or different runtime profiles) stay withheld as `n/a` regardless of launch count - a paired estimate still describes two processes more than two code paths.
+- A mixed-isolation ratio (one side isolated, one in-host) is never enforced; see [isolation.md](isolation.md#the-capture-fallback).
+
 ## Effect size
 
 ### `EffectSize`

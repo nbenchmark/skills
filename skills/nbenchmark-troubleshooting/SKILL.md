@@ -1,8 +1,8 @@
 ---
 name: nbenchmark-troubleshooting
-nbenchmarkVersion: v0.32.0
-lastVerified: 2026-07-21
-description: Diagnose and fix NBenchmark problems. Use when benchmarks report 0 ns, results are noisy or have a large Error/wide confidence interval, the Sig column is blank, benchmarks aren't discovered, a class can't be instantiated, or the NBenchmark.Analyzers diagnostics NB0001-NB0013 fire. Also covers tuning iterations/warmup/outlier mode and PerClass instance-lifetime contamination. For normal usage see the core nbenchmark, nbenchmark-host, and nbenchmark-reporters skills.
+nbenchmarkVersion: v0.37.0
+lastVerified: 2026-08-01
+description: Diagnose and fix NBenchmark problems. Use when benchmarks report 0 ns, results are noisy or have a large Error/wide confidence interval, the Sig column is blank, benchmarks aren't discovered, a class can't be instantiated, a benchmark fell back to in-process (capture fallback, missing worker), or the NBenchmark.Analyzers diagnostics NB0001-NB0014 fire. Also covers tuning iterations/warmup/outlier mode and PerClass instance-lifetime contamination. For normal usage see the core nbenchmark, nbenchmark-host, and nbenchmark-reporters skills.
 ---
 
 # NBenchmark Troubleshooting
@@ -16,11 +16,12 @@ Symptom → cause → fix for common measurement problems, plus the full analyze
 - The `Sig` column is blank
 - A `[Benchmark]` method isn't discovered
 - "Could not instantiate" errors
-- An NB0001-NB0013 analyzer diagnostic appears
+- A benchmark ran in-process when you expected a worker (`Iso` column shows `in-process (captures)` / `in-process (no worker)`)
+- An NB0001-NB0014 analyzer diagnostic appears
 - `[InstanceLifetime(PerClass)]` state-contamination warnings (NB0011 / NB0013)
 - Choosing iterations, warmup, or outlier mode
 
-## Analyzers (NB0001-NB0013)
+## Analyzers (NB0001-NB0014)
 
 Install `NBenchmark.Analyzers` for compile-time diagnostics (ships analyzers + code fixes; runs automatically in the IDE and `dotnet build`). Categories: `NBenchmark.Usage`, `NBenchmark.Performance`, `NBenchmark.Configuration`.
 
@@ -39,10 +40,13 @@ Install `NBenchmark.Analyzers` for compile-time diagnostics (ships analyzers + c
 | NB0011 | `[InstanceLifetime(PerClass)]` with a scoped service       | Warning  | Switch to `PerMethod` (code fix) or implement `IStateReset` (code fix) |
 | NB0012 | `[BenchmarkCases] cannot be combined with `[BenchmarkCase]` | Error  | Use one or the other                                   |
 | NB0013 | `[InstanceLifetime(PerClass)]` with a mutable instance field accessed by multiple `[Benchmark]` methods | Warning | Switch to `PerMethod` or make the field readonly |
+| NB0014 | Benchmark body captures state and cannot be isolated        | Info     | Pass the prepared state as its own delegate: `Benchmark.Run(prepare:, body:)` / `.WithState(...)`, or `[BenchmarkPlan]` for a whole suite |
 
-`Error` severity blocks the build. `Warning` (NB0001, NB0010, NB0011, NB0013) is reported but does not block. NB0004 is conservative (may have false positives - suppress if the analyzer can't see the work).
+`Error` severity blocks the build. `Warning` (NB0001, NB0010, NB0011, NB0013) is reported but does not block. **Info** (NB0014) is reported but does not block; raise it with `dotnet_diagnostic.NB0014.severity = warning` in `.editorconfig` when you want it visible. NB0004 is conservative (may have false positives - suppress if the analyzer can't see the work).
 
 NB0010 inspects **only** the `Action` (void) overloads of `Benchmark.Run` / `Benchmark.RunAsync` / `Benchmark.RunRaw` / `Benchmark.RunRawAsync`; value-returning and async overloads (`Run<T>`, `RunAsync`, `RunAsync<T>`, `RunRaw<T>`, …) are not flagged.
+
+NB0014 fires for capturing lambdas passed to both `Benchmark.Run*` and `BenchmarkSuite.Add`. In Suite mode, a capture in one body takes every sibling in-process, so the message names that. Parameterized `Add` bodies are not reported (parameters travel as serialized constants, so sweeps still isolate). `setup:` / `teardown:` delegates on `Add` are not measured bodies and are not reported.
 
 ### Code fixes
 
@@ -114,6 +118,20 @@ Benchmark.Run(() => int.Parse("12345"));
 | `--output` rejected                           | Output directory must be under the current working directory              | Use a path inside the CWD (it's created automatically)                                                   |
 | NB0011 / NB0013 on a `[Benchmark]` class      | `[InstanceLifetime(PerClass)]` sharing mutable state or scoped services across `[Benchmark]` methods | Switch to `[InstanceLifetime(PerMethod)]`, make the field readonly, or implement `IStateReset.ResetAsync` to make the reset explicit |
 
+## Process isolation
+
+Isolation is the default in every mode - each benchmark runs in a dedicated worker process. The `Iso` column (and `BenchmarkResult.IsolationStatus`) tells you where a measurement ran and why.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `in-process (captures)` on a result | The body captures a local/parameter/`this` from its enclosing scope; the worker cannot reconstruct captured values | Pass the prepared state as its own delegate: `Benchmark.Run(prepare:, body:)` / `.WithState(...)`. In Suite mode, one capture takes all siblings in-process - fix every capturing body |
+| `in-process (fixture)` on a test | Test class uses `IClassFixture` / `ITestOutputHelper` / constructor injection, or has object-graph arguments | That test cannot run in a worker; add `[AllowInProcessGate]` if you still want a ratio gate, or restructure the test so the worker can build the state |
+| `in-process (no worker)` on every result | No measurement worker was deployed - incomplete package restore or `NBenchmarkDeployWorker=false` | Check the target project references `NBenchmark` and has not set `NBenchmarkDeployWorker=false`; try a clean restore |
+| `in-process (inline)` on a suite | The suite is built inline with no addressable entry point | Add a `[BenchmarkPlan]` factory; see the core skill's [isolation reference](../nbenchmark/references/isolation.md#benchmarkplan---the-escape-hatch) |
+| `--strict-isolation` fails the run | One or more benchmarks fell back to in-process for a non-opt-out reason | Read the grouped failure output; apply the remedy per cause (capture -> prepared state; no worker -> deployment) |
+| Ratio shows `n/a` in a table | Rows were measured under different runtime configurations (isolated vs in-process, or different runtime profiles) | Expected behaviour - a cross-process ratio would describe two processes more than two code paths. Make all rows use the same isolation/profile, or read the within-group ratios |
+| `RuntimeProfileName` is `host` on a result you expected to isolate | The body fell back to the host, or you passed `--in-process` / `WithIsolation(false)` / `[InProcess]` / `--dry-run` | Check `IsolationStatus`; if `InProcessRequested`, that is the opt-out. If you want a specific profile, set `--runtime-profile` (it applies to workers only) |
+
 ## Instance lifetime & state contamination
 
 `InstanceLifetime.PerClass` (the default) reuses one instance across all `[Benchmark]` methods in a class. That's fine for stateless benchmarks, but if the class has mutable instance fields or scoped-service constructor dependencies, the second method can observe state cached by the first - violating the significance test's independence assumption and producing misleading results.
@@ -144,15 +162,18 @@ NBenchmark runs a significance test against the baseline when `EnableSignificanc
 | Stronger evidence before "significant" | Lower `SignificanceLevel` (e.g. `0.01`) / `--alpha 0.01`                    |
 | Filter out tiny-but-significant noise | Set `MinimumPracticalEffect` above the noise floor (default `0.147` = "small" Cliff's δ); set to `0` for p-value-only semantics |
 | Wider/more conservative Error          | Higher `ConfidenceLevel` (e.g. `0.99`)                                      |
-| Cross-launch stability                 | `WithLaunchCount(n)` (or `--launch-count n`); repeats the suite `n` times and populates `LaunchStatistics` |
-| Clean-room run (no warmup carry-over)  | `[IsolatedProcess]` in Harness mode                                            |
+| Cross-launch stability                 | `WithLaunchCount(n)` (or `--launch-count n`); repeats in a fresh worker per launch and populates `LaunchStatistics` (incl. `ProcessVarianceRatio` / `BetweenLaunchDispersion`). Harness default is 3. |
+| Clean-room run (no warmup carry-over)  | Isolation is the default in every mode. `[IsolatedProcess]` in Harness mode gives a benchmark its own dedicated worker (finest granularity); `Benchmark.RunInProcess` / `WithIsolation(false)` / `--in-process` are the deliberate opt-outs |
 | Reproducible run order                 | `--order declaration` or `--seed <n>`                                       |
 | GC isolation between iterations        | `MeasurementProfile.Independent` (or `--profile independent`) - forces GC before each iteration |
-| Cross-runtime comparison               | `[Runtimes(RuntimeMoniker.Net8, RuntimeMoniker.Net10)]` on the benchmark class |
+| Cross-runtime comparison               | `[Runtimes(RuntimeMoniker.Net8, RuntimeMoniker.Net10)]` on the benchmark class. Suite-mode multi-runtime requires `[BenchmarkPlan]`. |
+| Steady-state throughput (default)      | `--runtime-profile steady-state` (tiering/PGO/R2R off) - the default, removes the dominant source of measurement error for short bodies |
+| "What users see" measurement            | `--runtime-profile production` (tiering/PGO/R2R on) - imprecise; raise `--launch-count` and read the cross-launch interval |
+| Fail CI if not isolated                 | `--strict-isolation` (fails the run if any benchmark fell back to in-process) |
 
 ## Related skills
 
-- **nbenchmark** — measurement options, result fields, common patterns
-- **nbenchmark-host** — discovery, CLI, `[IsolatedProcess]`, DI
-- **nbenchmark-reporters** — output formats and detail levels
-- **nbenchmark-integration** — flaky performance thresholds in CI
+- **nbenchmark** — measurement options, result fields, common patterns, worker isolation (`IsolationStatus`, prepared state, runtime profiles)
+- **nbenchmark-host** — discovery, CLI, `[IsolatedProcess]`/`[InProcess]`, `--strict-isolation`, DI
+- **nbenchmark-reporters** — output formats and detail levels, the `Iso` column
+- **nbenchmark-integration** — flaky performance thresholds in CI, `RequireIsolation`, `[AllowInProcessGate]`
